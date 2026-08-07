@@ -18,8 +18,8 @@ latest release and offers the right download for your system.
 | Asset | For |
 |---|---|
 | `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows installer (Patch Companion + Profile Loader) |
-| `PGenerator-ICC-Companion-Portable-Windows-x64.zip` | Windows, no installer |
-| `PGenerator-ICC-Companion-Linux-x64.zip` | Linux (KDE/Wayland) |
+| `PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip` | Windows, no installer |
+| `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | Linux (KDE/Wayland) |
 
 These asset names and the `vMAJOR.MINOR.PATCH` tag format are a contract the
 web interface parses — keep them stable across releases.
