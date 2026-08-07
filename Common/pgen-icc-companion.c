@@ -73,7 +73,7 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#define APP_VERSION "1.4.0"
+#define APP_VERSION "1.4.1"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */
 #define PGEN_NEUTRAL_BLEND 0.06
@@ -178,6 +178,7 @@ typedef struct {
     bool status_dirty;
     char renderer_name[64];
     char selected_display[192];
+    SDL_DisplayID selected_display_id;
     double source_r, source_g, source_b;
     double submitted_r, submitted_g, submitted_b;
     bool correction_ready;
@@ -626,16 +627,21 @@ static bool select_target_display(void)
         const char *name = SDL_GetDisplayName(displays[0]);
         SDL_strlcpy(app.selected_display, name ? name : "Unnamed display",
                     sizeof(app.selected_display));
+        app.selected_display_id = displays[0];
         SDL_free(displays);
         return true;
     }
+    /* A saved DISPLAY= value only pre-selects the default button. It must not
+     * skip the picker on multi-monitor machines: substring matches like
+     * DISPLAY=YCT against "YCT Innoview" previously auto-selected the wrong
+     * panel and made the OLED unreachable without hand-editing the conf. */
     if (app.config.display[0]) {
         for (int index = 0; index < count; index++) {
             const char *name = SDL_GetDisplayName(displays[index]);
             if (name && (SDL_strcasecmp(name, app.config.display) == 0 ||
                          SDL_strcasestr(name, app.config.display))) {
                 selected = index + 1;
-                goto display_selected;
+                break;
             }
         }
     }
@@ -661,7 +667,7 @@ static bool select_target_display(void)
                      index + 1, (name && name[0]) ? name : "Unnamed display");
         buttons[index].buttonID = index + 1;
         buttons[index].text = labels[index];
-        if (index == 0) buttons[index].flags = SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT;
+        if (index + 1 == selected) buttons[index].flags = SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT;
     }
     SDL_zero(dialog);
     dialog.flags = SDL_MESSAGEBOX_INFORMATION;
@@ -677,25 +683,62 @@ static bool select_target_display(void)
 display_selected:
     if (selected < 1 || selected > count) selected = 1;
     {
-        const char *name = SDL_GetDisplayName(displays[selected - 1]);
+        SDL_DisplayID target = displays[selected - 1];
+        const char *name = SDL_GetDisplayName(target);
+        int width = 1280, height = 720;
         SDL_strlcpy(app.selected_display, name ? name : "Unnamed display",
                     sizeof(app.selected_display));
-    }
-    if (!SDL_GetDisplayUsableBounds(displays[selected - 1], &bounds)) {
-        ok = false;
-        goto done;
-    }
-    {
-        int width = 1280, height = 720;
-        int x, y;
+        app.selected_display_id = target;
         SDL_GetWindowSize(app.window, &width, &height);
-        x = bounds.x + (bounds.w - width) / 2;
-        y = bounds.y + (bounds.h - height) / 2;
-        if (!SDL_SetWindowPosition(app.window, x, y)) {
-            ok = false;
-            goto done;
+#ifndef _WIN32
+        /* Wayland ignores most SetWindowPosition calls. The reliable way to
+         * land on a chosen output is to recreate the window with
+         * SDL_WINDOWPOS_CENTERED_DISPLAY and then enter borderless fullscreen
+         * for that display. Otherwise the picker can say "Innoview" while the
+         * surface stays on the MSI primary and HDR/series fail. */
+        {
+            SDL_PropertiesID props = SDL_CreateProperties();
+            SDL_Window *moved = NULL;
+            if (props) {
+                SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING,
+                                      "PGenerator+ Patch Companion");
+                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER,
+                                      SDL_WINDOWPOS_CENTERED_DISPLAY(target));
+                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER,
+                                      SDL_WINDOWPOS_CENTERED_DISPLAY(target));
+                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
+                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
+                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER,
+                                      SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE);
+                moved = SDL_CreateWindowWithProperties(props);
+                SDL_DestroyProperties(props);
+            }
+            if (moved) {
+                SDL_DestroyWindow(app.window);
+                app.window = moved;
+                set_embedded_window_icon();
+            } else if (SDL_GetDisplayUsableBounds(target, &bounds)) {
+                int x = bounds.x + (bounds.w - width) / 2;
+                int y = bounds.y + (bounds.h - height) / 2;
+                (void)SDL_SetWindowPosition(app.window, x, y);
+            }
+            /* Borderless desktop fullscreen on the target output is the most
+             * reliable Wayland multi-monitor placement + HDR enable path. */
+            (void)SDL_SetWindowFullscreenMode(app.window, NULL);
+            if (SDL_SetWindowFullscreen(app.window, true)) {
+                app.fullscreen = true;
+                SDL_SyncWindow(app.window);
+                SDL_PumpEvents();
+            }
         }
-        SDL_SyncWindow(app.window);
+#else
+        if (SDL_GetDisplayUsableBounds(target, &bounds)) {
+            int x = bounds.x + (bounds.w - width) / 2;
+            int y = bounds.y + (bounds.h - height) / 2;
+            if (SDL_SetWindowPosition(app.window, x, y)) SDL_SyncWindow(app.window);
+        }
+#endif
+        SDL_ShowWindow(app.window);
         SDL_RaiseWindow(app.window);
     }
 done:
@@ -2269,8 +2312,9 @@ static bool try_create_renderer(bool hdr, const char *driver)
         /* On Windows the swapchain's Advanced Color state may not be exposed
          * until its first scRGB frame has been presented. Checking the HDR
          * property before that frame falsely rejects an HDR-enabled desktop.
-         * Give DWM and the renderer time to publish the dynamic state. */
-        hdr_deadline = SDL_GetTicks() + 1000;
+         * Wayland/KWin can also lag a bit after fullscreen + first present.
+         * Give the compositor time to publish the dynamic HDR state. */
+        hdr_deadline = SDL_GetTicks() + 2500;
         do {
             SDL_PumpEvents();
             if (!update_renderer_hdr_state()) {
@@ -2281,7 +2325,12 @@ static bool try_create_renderer(bool hdr, const char *driver)
             SDL_Delay(20);
         } while (SDL_GetTicks() < hdr_deadline);
         if (!app.hdr_active) {
-            SDL_SetError("The scRGB renderer did not enter HDR after its first presented frame");
+            SDL_SetError(
+                "The scRGB renderer did not enter HDR after its first presented frame "
+                "(driver=%s). On Linux install a working Vulkan stack "
+                "(vulkan-loader + mesa-vulkan-drivers or the vendor Vulkan package) "
+                "and enable HDR for this display in Plasma.",
+                app.renderer_name[0] ? app.renderer_name : (driver ? driver : "default"));
             destroy_renderer();
             return false;
         }
@@ -2304,10 +2353,13 @@ static bool try_create_renderer(bool hdr, const char *driver)
 static bool create_renderer(bool hdr)
 {
 #ifndef _WIN32
+    /* Prefer Vulkan (the path proven on Kubuntu/KDE Wayland). Then SDL's GPU
+     * backend, then the platform default. NULL must stay last. */
     const char *hdr_drivers[] = { "vulkan", "gpu", NULL };
     size_t index;
+    char attempt_error[256];
 #endif
-    char last_error[256] = "No HDR renderer was available";
+    char last_error[512] = "No HDR renderer was available";
 
     if (!hdr) return try_create_renderer(false, NULL);
 #ifdef _WIN32
@@ -2315,11 +2367,35 @@ static bool create_renderer(bool hdr)
     if (windows_create_hdr_output()) return true;
     SDL_strlcpy(last_error, SDL_GetError(), sizeof(last_error));
 #else
-    for (index = 0; index < SDL_arraysize(hdr_drivers); index++) {
-        if (try_create_renderer(true, hdr_drivers[index])) return true;
-        if (SDL_GetError() && SDL_GetError()[0]) {
-            SDL_strlcpy(last_error, SDL_GetError(), sizeof(last_error));
+    /* KWin only exposes an HDR-capable surface for some clients after the
+     * window is fullscreen on an HDR output. Attempt that before creating the
+     * scRGB renderer so SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN can become true. */
+    {
+        SDL_WindowFlags flags = SDL_GetWindowFlags(app.window);
+        if ((flags & SDL_WINDOW_FULLSCREEN) == 0) {
+            (void)SDL_SetWindowFullscreenMode(app.window, NULL);
+            if (SDL_SetWindowFullscreen(app.window, true)) {
+                app.fullscreen = true;
+                SDL_SyncWindow(app.window);
+                SDL_PumpEvents();
+                SDL_Delay(50);
+            }
         }
+        SDL_ShowWindow(app.window);
+        SDL_RaiseWindow(app.window);
+    }
+    for (index = 0; index < SDL_arraysize(hdr_drivers); index++) {
+        const char *driver = hdr_drivers[index];
+        if (try_create_renderer(true, driver)) return true;
+        attempt_error[0] = '\0';
+        if (SDL_GetError() && SDL_GetError()[0])
+            SDL_strlcpy(attempt_error, SDL_GetError(), sizeof(attempt_error));
+        else
+            SDL_strlcpy(attempt_error, "create failed", sizeof(attempt_error));
+        if (driver && driver[0])
+            SDL_snprintf(last_error, sizeof(last_error), "%s: %s", driver, attempt_error);
+        else
+            SDL_snprintf(last_error, sizeof(last_error), "default: %s", attempt_error);
     }
 #endif
 
@@ -3109,11 +3185,14 @@ static void process_network_updates(void)
     SDL_UnlockMutex(app.network_mutex);
     if (status_dirty) SDL_SetWindowTitle(app.window, title);
     if (have_settings) {
-        if (apply_display_settings(settings_fullscreen, settings_size)) {
-            SDL_LockMutex(app.network_mutex);
-            app.applied_settings_revision = settings_revision;
-            SDL_UnlockMutex(app.network_mutex);
-        }
+        /* Always consume the revision. On Wayland, fullscreen/position changes
+         * can fail or be asynchronous; retrying every poll (50-500 ms) made the
+         * window thrash in and out of the taskbar. One attempt per revision is
+         * enough: the operator can toggle the setting again if needed. */
+        (void)apply_display_settings(settings_fullscreen, settings_size);
+        SDL_LockMutex(app.network_mutex);
+        app.applied_settings_revision = settings_revision;
+        SDL_UnlockMutex(app.network_mutex);
     }
     if (have_command) {
         bool ok;
@@ -3368,22 +3447,60 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                                  "--server=http://<address>.", NULL);
         return SDL_APP_FAILURE;
     }
-    if (!SDL_Init(SDL_INIT_VIDEO)) return SDL_APP_FAILURE;
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
+                                 SDL_GetError()[0] ? SDL_GetError()
+                                                   : "Could not initialize video.",
+                                 NULL);
+        return SDL_APP_FAILURE;
+    }
     app.network_mutex = SDL_CreateMutex();
     if (!app.network_mutex) return SDL_APP_FAILURE;
     app.window = SDL_CreateWindow("PGenerator+ Patch Companion", 1280, 720,
                                   SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE);
-    if (!app.window) return SDL_APP_FAILURE;
+    if (!app.window) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
+                                 SDL_GetError()[0] ? SDL_GetError()
+                                                   : "Could not create the Patch Companion window.",
+                                 NULL);
+        return SDL_APP_FAILURE;
+    }
 #ifdef _WIN32
     set_windows_window_icon();
 #else
     set_embedded_window_icon();
 #endif
-    if (!select_target_display()) return SDL_APP_FAILURE;
+    if (!select_target_display()) {
+        char detail[320];
+        const char *error = SDL_GetError();
+        if (error && error[0])
+            SDL_snprintf(detail, sizeof(detail),
+                         "Could not select the profiling display.\n\n%s", error);
+        else
+            SDL_strlcpy(detail, "Could not select the profiling display.", sizeof(detail));
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
+                                 detail, app.window);
+        return SDL_APP_FAILURE;
+    }
     app.fullscreen = false;
     app.displayed_size = 100;
-    if (!create_renderer(false)) return SDL_APP_FAILURE;
-    if (!render_alignment()) return SDL_APP_FAILURE;
+    if (!create_renderer(false)) {
+        char detail[320];
+        const char *error = SDL_GetError();
+        if (error && error[0])
+            SDL_snprintf(detail, sizeof(detail),
+                         "Could not create the Patch Companion renderer.\n\n%s", error);
+        else
+            SDL_strlcpy(detail, "Could not create the Patch Companion renderer.", sizeof(detail));
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
+                                 detail, app.window);
+        return SDL_APP_FAILURE;
+    }
+    if (!render_alignment()) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
+                                 "Could not draw the alignment target.", app.window);
+        return SDL_APP_FAILURE;
+    }
     if (!app.config.token[0]) {
         /* A static, unpaired download has an address but no token yet: ask
          * the operator to approve this computer in the WebUI before falling
@@ -3392,16 +3509,25 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
                                      companion_pair_error[0] ? companion_pair_error
                                                               : "Pairing with PGenerator+ failed.",
-                                     NULL);
+                                     app.window);
             return SDL_APP_FAILURE;
         }
-        if (!render_alignment()) return SDL_APP_FAILURE;
+        if (!render_alignment()) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
+                                     "Could not draw the alignment target after pairing.",
+                                     app.window);
+            return SDL_APP_FAILURE;
+        }
     }
     SDL_strlcpy(app.ack_renderer, app.renderer_name, sizeof(app.ack_renderer));
     app.ack_hdr_active = app.hdr_active;
     SDL_SetAtomicInt(&app.quit_requested, 0);
     app.network_thread = SDL_CreateThread(network_thread_main, "PGen ICC network", NULL);
-    if (!app.network_thread) return SDL_APP_FAILURE;
+    if (!app.network_thread) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
+                                 "Could not start the network thread.", app.window);
+        return SDL_APP_FAILURE;
+    }
     *appstate = &app;
     return SDL_APP_CONTINUE;
 }
