@@ -8,8 +8,29 @@ Source for the two desktop companions to PGenerator+ display profiling:
   display, in SDR and in HDR, then keeps checking that it is still the
   profile the display is actually using.
 
-Prebuilt copies ship with PGenerator+; this repository is for building them
-yourself.
+## Downloads
+
+Ready-to-run builds are published on the
+[Releases](https://github.com/BigShoots/Pgenerator_Plus_ICC_Tools/releases/latest)
+page, and the PGenerator+ web interface links to them directly — it checks the
+latest release and offers the right download for your system.
+
+| Asset | For |
+|---|---|
+| `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows installer (Patch Companion + Profile Loader) |
+| `PGenerator-ICC-Companion-Portable-Windows-x64.zip` | Windows, no installer |
+| `PGenerator-ICC-Companion-Linux-x64.zip` | Linux (KDE/Wayland) |
+
+These asset names and the `vMAJOR.MINOR.PATCH` tag format are a contract the
+web interface parses — keep them stable across releases.
+
+The downloads are not tied to a particular PGenerator+ unit. The Patch
+Companion finds yours by resolving `pgenerator.local`, and you approve the
+pairing request in the web interface the first time it connects. Setting
+`SERVER=` explicitly in `PGenICCCompanion.conf` overrides discovery, for
+networks where mDNS is blocked or more than one unit is present.
+
+The rest of this repository is the source, for building the tools yourself.
 
 ## Layout
 
