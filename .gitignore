@@ -1,0 +1,30 @@
+# Build outputs. The Windows installer script collects its inputs here, so this
+# is also where SDL3.dll and the ArgyllCMS executables are staged before
+# makensis runs.
+build/
+bin/
+obj/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.so.*
+*.zip
+*.tar.gz
+
+# Locally built tool binaries
+PGenICCCompanion
+PGenProfileLoader
+PGeneratorPlusPatchCompanion
+
+# Extracted/downloaded SDL3 MinGW devel package (fetched per the README, not
+# committed).
+SDL3-*/
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
