@@ -64,6 +64,8 @@ typedef struct {
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <wayland-client.h>
+#include "pgen-color-management-v1-client-protocol.h"
 #define close_socket close
 typedef int socket_handle_t;
 #define INVALID_SOCKET_HANDLE (-1)
@@ -73,12 +75,229 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#define APP_VERSION "1.4.0"
+#define APP_VERSION "1.4.5"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */
 #define PGEN_NEUTRAL_BLEND 0.06
 #define RESPONSE_CAPACITY 32768
 #define PGEN_UNUSED __attribute__((unused))
+
+#ifndef _WIN32
+typedef struct {
+    struct wl_display *display;
+    struct wp_color_manager_v1 *manager;
+    struct wp_color_management_surface_v1 *surface;
+    bool parametric;
+    bool luminances;
+    bool pq;
+    bool bt2020;
+    bool absolute_intent;
+    bool description_ready;
+    bool description_failed;
+} PgenWaylandColor;
+
+static PgenWaylandColor wayland_color;
+
+static void pgen_cm_intent(void *data, struct wp_color_manager_v1 *manager,
+                           uint32_t intent)
+{
+    PgenWaylandColor *state = data;
+    (void)manager;
+    if (intent == WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE)
+        state->absolute_intent = true;
+}
+
+static void pgen_cm_feature(void *data, struct wp_color_manager_v1 *manager,
+                            uint32_t feature)
+{
+    PgenWaylandColor *state = data;
+    (void)manager;
+    if (feature == WP_COLOR_MANAGER_V1_FEATURE_PARAMETRIC)
+        state->parametric = true;
+    else if (feature == WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES)
+        state->luminances = true;
+}
+
+static void pgen_cm_tf(void *data, struct wp_color_manager_v1 *manager,
+                       uint32_t transfer)
+{
+    PgenWaylandColor *state = data;
+    (void)manager;
+    if (transfer == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ)
+        state->pq = true;
+}
+
+static void pgen_cm_primaries(void *data, struct wp_color_manager_v1 *manager,
+                              uint32_t primaries)
+{
+    PgenWaylandColor *state = data;
+    (void)manager;
+    if (primaries == WP_COLOR_MANAGER_V1_PRIMARIES_BT2020)
+        state->bt2020 = true;
+}
+
+static void pgen_cm_done(void *data, struct wp_color_manager_v1 *manager)
+{
+    (void)data;
+    (void)manager;
+}
+
+static const struct wp_color_manager_v1_listener pgen_cm_listener = {
+    pgen_cm_intent, pgen_cm_feature, pgen_cm_tf, pgen_cm_primaries, pgen_cm_done
+};
+
+static void pgen_registry_global(void *data, struct wl_registry *registry,
+                                 uint32_t name, const char *interface,
+                                 uint32_t version)
+{
+    PgenWaylandColor *state = data;
+    if (!strcmp(interface, wp_color_manager_v1_interface.name)) {
+        uint32_t bind_version = version < 2 ? version : 2;
+        state->manager = wl_registry_bind(registry, name,
+                                          &wp_color_manager_v1_interface,
+                                          bind_version);
+        wp_color_manager_v1_add_listener(state->manager, &pgen_cm_listener,
+                                         state);
+    }
+}
+
+static void pgen_registry_remove(void *data, struct wl_registry *registry,
+                                 uint32_t name)
+{
+    (void)data;
+    (void)registry;
+    (void)name;
+}
+
+static const struct wl_registry_listener pgen_registry_listener = {
+    pgen_registry_global, pgen_registry_remove
+};
+
+static void pgen_description_failed(void *data,
+                                    struct wp_image_description_v1 *description,
+                                    uint32_t cause, const char *message)
+{
+    PgenWaylandColor *state = data;
+    (void)description;
+    (void)cause;
+    state->description_failed = true;
+    SDL_Log("KWin rejected the HDR surface description: %s",
+            message && message[0] ? message : "unknown reason");
+}
+
+static void pgen_description_ready(void *data,
+                                   struct wp_image_description_v1 *description,
+                                   uint32_t identity)
+{
+    PgenWaylandColor *state = data;
+    (void)description;
+    (void)identity;
+    state->description_ready = true;
+}
+
+static void pgen_description_ready2(void *data,
+                                    struct wp_image_description_v1 *description,
+                                    uint32_t identity_hi, uint32_t identity_lo)
+{
+    PgenWaylandColor *state = data;
+    (void)description;
+    (void)identity_hi;
+    (void)identity_lo;
+    state->description_ready = true;
+}
+
+static const struct wp_image_description_v1_listener pgen_description_listener = {
+    pgen_description_failed, pgen_description_ready, pgen_description_ready2
+};
+
+static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
+                                         uint32_t reference_luminance)
+{
+    SDL_PropertiesID properties;
+    struct wl_surface *wl_surface;
+
+    if (strcmp(SDL_GetCurrentVideoDriver(), "wayland")) return true;
+    if (!hdr && !wayland_color.surface) return true;
+    properties = SDL_GetWindowProperties(window);
+    wayland_color.display = SDL_GetPointerProperty(
+        properties, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
+    wl_surface = SDL_GetPointerProperty(
+        properties, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+    if (!wayland_color.display || !wl_surface) {
+        return SDL_SetError("Wayland did not expose the window surface");
+    }
+
+    if (!wayland_color.manager) {
+        struct wl_registry *registry = wl_display_get_registry(wayland_color.display);
+        if (!registry) return SDL_SetError("Could not read Wayland globals");
+        wl_registry_add_listener(registry, &pgen_registry_listener,
+                                 &wayland_color);
+        if (wl_display_roundtrip(wayland_color.display) < 0 ||
+            wl_display_roundtrip(wayland_color.display) < 0) {
+            wl_registry_destroy(registry);
+            return SDL_SetError("Could not query Wayland color management");
+        }
+        wl_registry_destroy(registry);
+        if (!wayland_color.manager)
+            return SDL_SetError("KWin does not expose color-management-v1");
+        SDL_Log("Creating Wayland color-management surface (hdr=%d)", hdr ? 1 : 0);
+        wayland_color.surface = wp_color_manager_v1_get_surface(
+            wayland_color.manager, wl_surface);
+    }
+
+    SDL_Log("Setting Wayland surface color state hdr=%d manager=%p surface=%p",
+            hdr ? 1 : 0, (void *)wayland_color.manager,
+            (void *)wayland_color.surface);
+
+    if (!hdr) {
+        if (wayland_color.surface)
+            wp_color_management_surface_v1_unset_image_description(
+                wayland_color.surface);
+        wl_display_flush(wayland_color.display);
+        return true;
+    }
+
+    if (!wayland_color.parametric || !wayland_color.luminances ||
+        !wayland_color.pq || !wayland_color.bt2020 ||
+        !wayland_color.absolute_intent) {
+        return SDL_SetError("KWin lacks native BT.2020/PQ surface support");
+    }
+
+    {
+        struct wp_image_description_creator_params_v1 *creator =
+            wp_color_manager_v1_create_parametric_creator(
+                wayland_color.manager);
+        struct wp_image_description_v1 *description;
+        if (!creator) return SDL_SetError("Could not create HDR parameters");
+        wp_image_description_creator_params_v1_set_tf_named(
+            creator, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
+        wp_image_description_creator_params_v1_set_primaries_named(
+            creator, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020);
+        wp_image_description_creator_params_v1_set_luminances(
+            creator, 0, 10000,
+            reference_luminance ? reference_luminance : 203);
+        description = wp_image_description_creator_params_v1_create(creator);
+        if (!description) return SDL_SetError("Could not create HDR description");
+        wayland_color.description_ready = false;
+        wayland_color.description_failed = false;
+        wp_image_description_v1_add_listener(description,
+                                             &pgen_description_listener,
+                                             &wayland_color);
+        if (wl_display_roundtrip(wayland_color.display) < 0 ||
+            wayland_color.description_failed ||
+            !wayland_color.description_ready) {
+            wp_image_description_v1_destroy(description);
+            return SDL_SetError("KWin rejected the BT.2020/PQ description");
+        }
+        wp_color_management_surface_v1_set_image_description(
+            wayland_color.surface, description,
+            WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE);
+        wp_image_description_v1_destroy(description);
+        wl_display_flush(wayland_color.display);
+    }
+    return true;
+}
+#endif
 /* PGenerator+ runs its own mDNS responder under this name, independent of
  * whatever mDNS stack the host OS may or may not have configured, so a plain
  * getaddrinfo() for it resolves on both Windows 10+ and Linux with
@@ -163,10 +382,10 @@ typedef struct {
     char correction_signal_mode[16];
     float *correction_lut;
     int correction_lut_grid;
-#ifdef _WIN32
+    /* The profile bytes the transform runs on. Both platforms need these now:
+     * only the way the file is located differs, not what is done with it. */
     unsigned char *correction_profile_data;
     size_t correction_profile_size;
-#endif
     uint64_t correction_lut_revision;
     char correction_error[256];
     bool ack_pending;
@@ -179,6 +398,12 @@ typedef struct {
     char renderer_name[64];
     char selected_display[192];
     SDL_DisplayID selected_display_id;
+#ifndef _WIN32
+    /* Full path of the profile KWin has assigned to the selected output, as of
+     * the last poll. The correction stages read the file from here, the way the
+     * Windows build reads the path DXGI hands it. */
+    char linux_profile_path[1024];
+#endif
     double source_r, source_g, source_b;
     double submitted_r, submitted_g, submitted_b;
     bool correction_ready;
@@ -631,19 +856,32 @@ static bool select_target_display(void)
         SDL_free(displays);
         return true;
     }
-    /* A saved DISPLAY= value only pre-selects the default button. It must not
-     * skip the picker on multi-monitor machines: substring matches like
-     * DISPLAY=YCT against "YCT Innoview" previously auto-selected the wrong
-     * panel and made the OLED unreachable without hand-editing the conf. */
+    /* A saved DISPLAY= value skips the picker only when it is UNAMBIGUOUS.
+     *
+     * Matching the first substring hit used to pick the wrong panel and left
+     * the other monitor unreachable without hand-editing the conf, so the
+     * picker became mandatory - but that stopped the Companion ever starting
+     * unattended, which is how it is normally driven. Counting the matches
+     * gets both: one match is a decision the user already made, more than one
+     * is genuinely ambiguous and still worth asking about. An exact,
+     * case-insensitive name always wins over a substring. */
     if (app.config.display[0]) {
+        int matches = 0, exact = 0, first_match = 0, first_exact = 0;
         for (int index = 0; index < count; index++) {
             const char *name = SDL_GetDisplayName(displays[index]);
-            if (name && (SDL_strcasecmp(name, app.config.display) == 0 ||
-                         SDL_strcasestr(name, app.config.display))) {
-                selected = index + 1;
-                break;
+            if (!name) continue;
+            if (SDL_strcasecmp(name, app.config.display) == 0) {
+                if (!exact++) first_exact = index + 1;
+            } else if (SDL_strcasestr(name, app.config.display)) {
+                if (!matches++) first_match = index + 1;
             }
         }
+        if (exact == 1) { selected = first_exact; goto display_selected; }
+        if (!exact && matches == 1) { selected = first_match; goto display_selected; }
+        /* Ambiguous or unmatched: fall through to the picker, pre-selecting a
+         * candidate if there was one so the default button is the likely one. */
+        if (exact) selected = first_exact;
+        else if (matches) selected = first_match;
     }
 #ifdef _WIN32
     {
@@ -1245,7 +1483,9 @@ static PGEN_UNUSED double read_s15(const unsigned char *value)
     return raw / 65536.0;
 }
 
-#ifdef _WIN32
+/* ICC parsing and the PCS->device transform. Platform-neutral maths on the
+ * profile bytes: only LOCATING the profile differs between Windows and
+ * KWin, so this stays one implementation rather than being duplicated. */
 typedef struct { const unsigned char *data; size_t size; } IccTag;
 
 static IccTag icc_tag(const unsigned char *profile, size_t size, const char signature[4])
@@ -1524,7 +1764,7 @@ static bool apply_mhc2_inverse(double rgb[3])
     return true;
 }
 
-static bool apply_vcgt(double rgb[3])
+static PGEN_UNUSED bool apply_vcgt(double rgb[3])
 {
     IccTag tag=icc_tag(app.correction_profile_data,app.correction_profile_size,"vcgt");
     if(!tag.data||tag.size<18||memcmp(tag.data,"vcgt",4)) return false;
@@ -1632,14 +1872,11 @@ static bool apply_local_mhc2(const double input[3], double output[3])
     return true;
 }
 
-#endif
 
 static bool load_correction_lut(uint64_t revision)
 {
-#ifdef _WIN32
     FILE *file;
     long length;
-#endif
     /* "none" is a true passthrough: no profile is required and nothing is
      * applied. "system" still needs the profile for the fullscreen MHC2
      * stand-in below, so the two are only equivalent for readiness. */
@@ -1651,36 +1888,42 @@ static bool load_correction_lut(uint64_t revision)
     app.correction_lut = NULL;
     app.correction_lut_grid = 0;
     app.correction_ready = system_mode;
-#ifndef _WIN32
-    /* Report the real reason first. Reading the display's active profile and
-     * applying it are both Windows-only here, so the generic "the operating
-     * system did not report an active ICC profile" message below would blame a
-     * missing profile for something this build cannot do at all. */
-    if (!system_mode) {
-        app.correction_ready = false;
-        SDL_strlcpy(app.correction_error,
-                    "Active-profile correction needs the Windows Companion",
-                    sizeof(app.correction_error));
-        return false;
-    }
-    app.correction_lut_revision = revision;
-    app.correction_error[0] = '\0';
-    return true;
-#endif
     if (!app.correction_profile[0]) {
         if(system_mode){app.correction_lut_revision=revision;app.correction_error[0]='\0';return true;}
         app.correction_ready = false;
+#ifdef _WIN32
         SDL_strlcpy(app.correction_error, "The operating system did not report an active ICC profile for the selected display", sizeof(app.correction_error));
+#else
+        /* Name the compositor and the slot: on Plasma 6.7 an HDR display has a
+         * separate "HDR ICC profile" assignment, and a display with only the
+         * SDR one set looks identical to one with nothing set. */
+        SDL_strlcpy(app.correction_error,
+                    "No ICC profile is assigned to this display in KWin",
+                    sizeof(app.correction_error));
+#endif
         return false;
     }
 #ifdef _WIN32
     file=_wfopen(app.correction_profile_path,L"rb");
-    if(!file||fseek(file,0,SEEK_END)!=0||(length=ftell(file))<132||length>16*1024*1024||fseek(file,0,SEEK_SET)!=0){if(file)fclose(file);if(system_mode){app.correction_lut_revision=revision;app.correction_error[0]='\0';return true;}SDL_strlcpy(app.correction_error,"Could not open the active Windows display profile",sizeof(app.correction_error));return false;}
-    SDL_free(app.correction_profile_data); app.correction_profile_data=SDL_malloc((size_t)length); app.correction_profile_size=0;
-    if(!app.correction_profile_data||fread(app.correction_profile_data,1,(size_t)length,file)!=(size_t)length){fclose(file);SDL_free(app.correction_profile_data);app.correction_profile_data=NULL;SDL_strlcpy(app.correction_error,"Could not read the active Windows display profile",sizeof(app.correction_error));return false;}
-    fclose(file); app.correction_profile_size=(size_t)length;
-    if(memcmp(app.correction_profile_data+12,"mntr",4)||memcmp(app.correction_profile_data+16,"RGB ",4)||memcmp(app.correction_profile_data+20,"XYZ ",4)){SDL_free(app.correction_profile_data);app.correction_profile_data=NULL;app.correction_profile_size=0;SDL_strlcpy(app.correction_error,"The active Windows profile is not a supported RGB display profile",sizeof(app.correction_error));return false;}
+#else
+    /* Same file, different way of finding it: DXGI names it on Windows, KWin
+     * names it here. Everything after the open is identical, so the profile
+     * parsing and the whole transform stay a single implementation. */
+    if (!app.linux_profile_path[0]) {
+        if(system_mode){app.correction_lut_revision=revision;app.correction_error[0]='\0';return true;}
+        app.correction_ready = false;
+        SDL_strlcpy(app.correction_error,
+                    "No ICC profile is assigned to this display in KWin",
+                    sizeof(app.correction_error));
+        return false;
+    }
+    file=fopen(app.linux_profile_path,"rb");
 #endif
+    if(!file||fseek(file,0,SEEK_END)!=0||(length=ftell(file))<132||length>16*1024*1024||fseek(file,0,SEEK_SET)!=0){if(file)fclose(file);if(system_mode){app.correction_lut_revision=revision;app.correction_error[0]='\0';return true;}SDL_strlcpy(app.correction_error,"Could not open the display's active ICC profile",sizeof(app.correction_error));return false;}
+    SDL_free(app.correction_profile_data); app.correction_profile_data=SDL_malloc((size_t)length); app.correction_profile_size=0;
+    if(!app.correction_profile_data||fread(app.correction_profile_data,1,(size_t)length,file)!=(size_t)length){fclose(file);SDL_free(app.correction_profile_data);app.correction_profile_data=NULL;SDL_strlcpy(app.correction_error,"Could not read the display's active ICC profile",sizeof(app.correction_error));return false;}
+    fclose(file); app.correction_profile_size=(size_t)length;
+    if(memcmp(app.correction_profile_data+12,"mntr",4)||memcmp(app.correction_profile_data+16,"RGB ",4)||memcmp(app.correction_profile_data+20,"XYZ ",4)){SDL_free(app.correction_profile_data);app.correction_profile_data=NULL;app.correction_profile_size=0;SDL_strlcpy(app.correction_error,"The active profile is not a supported RGB display profile",sizeof(app.correction_error));return false;}
     app.correction_lut_revision = revision;
     app.correction_error[0] = '\0';
     app.correction_ready = true;
@@ -1689,17 +1932,17 @@ static bool load_correction_lut(uint64_t revision)
 
 static bool apply_correction_lut(double *red, double *green, double *blue)
 {
-#ifdef _WIN32
     double rgb[3]={*red,*green,*blue},xyz[3],output[3],white_nits=1.0;
-    double media_white[3],adaptation[3][3];
-#endif
-#ifdef _WIN32
+    static const double d65_white[3]={0.9504559,1.0,1.0890578};
+    double adaptation[3][3];
+
     /* Pure passthrough. Profiling selects this so the characterization
-     * measures the panel itself: "system" is NOT a no-correction mode,
-     * because the branch below deliberately applies MHC2 on fullscreen HDR
-     * where Windows would skip it. */
+     * measures the panel itself: on Windows "system" is NOT a no-correction
+     * mode, because the branch below deliberately applies MHC2 on fullscreen
+     * HDR where Windows would skip it. */
     if(!strcmp(app.correction_mode,"none")) return true;
     if(!strcmp(app.correction_mode,"system")){
+#ifdef _WIN32
         /* Windows can bypass an HDR profile's MHC2 transform for a
          * borderless monitor-covering swapchain even when DWM reports the
          * presentation as composed. Apply that native HDR calibration stage
@@ -1709,26 +1952,22 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
            !strcmp(app.correction_signal_mode,"hdr10")&&apply_local_mhc2(rgb,output)){
             *red=output[0];*green=output[1];*blue=output[2];
         }
+#else
+        /* KWin composites the assigned profile itself, including in HDR from
+         * Plasma 6.7 on, so there is nothing here to stand in for - applying
+         * it again would correct the patch twice. "system" means the
+         * compositor's correction, and letting the patch through unchanged is
+         * exactly how the meter gets to measure it. */
+#endif
         return true;
     }
     if(!app.correction_profile_data)return false;
-    /* Neutral HDR patches used to be diverted to MHC2 here, because a
-     * relative-colorimetric BToA maps PCS white onto the uncalibrated media
-     * white and so returned neutrals at the panel's native white. That is a
-     * property of how the PCS target was built, not of the table: adapting the
-     * requested XYZ with the profile's own Bradford transform now lands
-     * neutral on the requested white through the cLUT itself.
-     *
-     * Keeping the diversion actively hurt. It corrected the grey axis with a
-     * different engine than everything around it, so an exactly neutral patch
-     * and a patch one code off neutral took different paths and disagreed at
-     * the boundary, and the grey axis inherited the MHC2 curves' behaviour of
-     * freezing once the measured channel response saturates. In these modes
-     * the Companion is the only correction stage, so one transform handles the
-     * whole space. MHC2 still runs for correction_mode "system", where it
-     * stands in for the calibration stage Windows skips on fullscreen output. */
-    {IccTag wtpt=icc_tag(app.correction_profile_data,app.correction_profile_size,"wtpt");if(!wtpt.data||wtpt.size<20||memcmp(wtpt.data,"XYZ ",4))return false;for(int channel=0;channel<3;channel++){media_white[channel]=read_s15(wtpt.data+8+channel*4);if(media_white[channel]<=0.0)return false;}}
-    if(!companion_adaptation(media_white,adaptation))return false;
+    /* Both sRGB and BT.2020 use D65.  ICC PCS is D50, so source colours must
+     * always be adapted from D65 to D50 before entering BToA.  The profile's
+     * wtpt is the measured display white and is characterization data, not the
+     * source white for this conversion.  Using it here moved even requested
+     * D65 white away from PCS white and produced a severe red/yellow cast. */
+    if(!companion_adaptation(d65_white,adaptation))return false;
     if(!strcmp(app.correction_signal_mode,"hdr10")&&!companion_characterization_white(&white_nits)){
         IccTag lumi=icc_tag(app.correction_profile_data,app.correction_profile_size,"lumi");
         if(!lumi.data||lumi.size<20||memcmp(lumi.data,"XYZ ",4)||(white_nits=read_s15(lumi.data+12))<=0.0)return false;
@@ -1736,21 +1975,11 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
     companion_source_xyz(rgb,app.correction_signal_mode,white_nits,adaptation,xyz);
     if(!strcmp(app.correction_mode,"clut")){if(!apply_local_clut(xyz,output))return false;}
     else if(!apply_local_matrix(xyz,output))return false;
-    /* No vcgt after the cLUT. The cLUT is fitted to raw measurements, so it is
-     * already a complete PCS->device transform and composing a calibration on
-     * top would correct twice. The 1D stage runs on the SOURCE code below,
-     * where it bypasses the cLUT's shadow grid. */
+    /* A 3D cLUT cannot resolve the steep PQ shadow axis at its grid spacing.
+     * Use the profile's own MHC2 calibration for exact and near-neutral HDR
+     * requests, while chromatic requests continue through the selected cLUT
+     * or matrix transform. */
     {
-        /* On the grey axis take the calibration straight from the source code
-         * instead, bypassing the cLUT whose shadow grid cannot resolve the PQ
-         * conversion. Blend by how neutral the request is so there is no seam
-         * one code off neutral.
-         *
-         * MHC2 is preferred over vcgt here: both carry the same measured 1D
-         * response, but MHC2 also carries the 3x3, so it corrects chromaticity
-         * as well as tone. vcgt is per-channel only and can do no more than
-         * scale each channel, which measured a worse white point. vcgt remains
-         * the fallback for profiles built without an MHC2 tag. */
         double direct[3];
         double high=rgb[0]>rgb[1]?(rgb[0]>rgb[2]?rgb[0]:rgb[2]):(rgb[1]>rgb[2]?rgb[1]:rgb[2]);
         double low=rgb[0]<rgb[1]?(rgb[0]<rgb[2]?rgb[0]:rgb[2]):(rgb[1]<rgb[2]?rgb[1]:rgb[2]);
@@ -1769,16 +1998,6 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
     }
     *red = output[0]; *green = output[1]; *blue = output[2];
     return true;
-#else
-    (void)red; (void)green; (void)blue;
-    /* "none" and "system" are the same true passthrough here: there is no
-     * OS-managed display transform to apply, and none to cancel either, so the
-     * requested code reaches the panel unchanged. Returning false for them
-     * rejected every patch this Companion was ever sent. The active-profile
-     * modes really cannot run, and say so. */
-    return !strcmp(app.correction_mode, "none") ||
-           !strcmp(app.correction_mode, "system");
-#endif
 }
 
 static bool json_number(const char *json, const char *key, double *value)
@@ -2205,9 +2424,182 @@ static uint32_t patch_to_hdr10(double r, double g, double b)
     return 0xc0000000u | (blue << 20) | (green << 10) | red;
 }
 
+#ifndef _WIN32
+/* What KWin says about the output the patches land on.
+ *
+ * Two things are only knowable from the compositor. SDL reports HDR through
+ * the Wayland colour-management protocol, which KWin does not always answer
+ * for a client even while it is driving the panel in HDR - the same gap the
+ * Windows path works around with DXGI's output description. And the ICC
+ * profile assigned to a display is the compositor's business entirely.
+ *
+ * Plasma 6.7 keeps SDR and HDR assignments in SEPARATE slots: "ICC profile"
+ * and "HDR ICC profile". The HDR one is absent from `kscreen-doctor -j`
+ * (which carries only iccProfilePath), so the human-readable `-o` form is the
+ * only source for it. An HDR display commonly has an HDR profile and an EMPTY
+ * SDR one, which is why reading iccProfilePath alone reports "no profile".
+ */
+typedef struct {
+    bool found;
+    bool enabled;
+    bool hdr;
+    int sdr_brightness;
+    double scale;
+    char connector[64];
+    long score;               /* Distance from the SDL rectangle */
+    char icc_path[1024];      /* SDR slot */
+    char hdr_icc_path[1024];  /* HDR slot, Plasma 6.7+ */
+} KWinOutputState;
+
+/* kscreen-doctor colours its output; the escapes sit inside the values. */
+static void kwin_strip_ansi(char *text)
+{
+    char *read = text, *write = text;
+    while (*read) {
+        if (*read == 0x1b) {
+            while (*read && *read != 'm') read++;
+            if (*read) read++;
+            continue;
+        }
+        *write++ = *read++;
+    }
+    *write = '\0';
+}
+
+static void kwin_trim(char *value)
+{
+    char *end;
+    while (*value == ' ' || *value == '\t') memmove(value, value + 1, strlen(value));
+    end = value + strlen(value);
+    while (end > value && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = '\0';
+}
+
+/* Matched by LOGICAL GEOMETRY, not by name: SDL names a display by its make
+ * and model ("YCT Innoview") while kscreen-doctor names it by connector
+ * ("HDMI-A-1"), and neither can be derived from the other.
+ *
+ * The two do NOT agree exactly. On a fractionally scaled output they round the
+ * logical size differently - a real example being SDL 2133x1333 against
+ * kscreen 2134x1334 for the same panel, with identical positions. So this
+ * scores every output by how far it sits from the SDL rectangle and takes the
+ * nearest, rather than demanding equality and matching nothing. Position
+ * dominates the score because two monitors can share a size but never an
+ * origin. */
+static bool kwin_output_state(SDL_DisplayID display, KWinOutputState *state)
+{
+    FILE *pipe;
+    char line[1400];
+    SDL_Rect bounds;
+    bool current = false;
+    int enabled_count = 0;
+    long best_score = -1;
+    KWinOutputState pending, best, sole_enabled;
+
+    SDL_zerop(state);
+    if (!display || !SDL_GetDisplayBounds(display, &bounds)) return false;
+    pipe = popen("kscreen-doctor -o 2>/dev/null", "r");
+    if (!pipe) return false;
+    SDL_zero(pending);
+    SDL_zero(best);
+    SDL_zero(sole_enabled);
+    while (fgets(line, sizeof(line), pipe)) {
+        char *cursor = line;
+        kwin_strip_ansi(line);
+        while (*cursor == ' ' || *cursor == '\t') cursor++;
+        if (!strncmp(cursor, "Output:", 7)) {
+            if (current && pending.enabled) {
+                enabled_count++;
+                sole_enabled = pending;
+            }
+            if (current && pending.found &&
+                (best_score < 0 || pending.score < best_score)) {
+                best = pending;
+                best_score = pending.score;
+            }
+            SDL_zero(pending);
+            {   /* "Output: 2 HDMI-A-1 <uuid>" */
+                char identifier[32], name[64];
+                if (sscanf(cursor + 7, "%31s %63s", identifier, name) == 2)
+                    SDL_strlcpy(pending.connector, name, sizeof(pending.connector));
+            }
+            current = true;
+        } else if (current && !strncmp(cursor, "enabled", 7)) {
+            pending.enabled = true;
+        } else if (current && !strncmp(cursor, "Geometry:", 9)) {
+            int x = 0, y = 0, w = 0, h = 0;
+            if (sscanf(cursor + 9, " %d,%d %dx%d", &x, &y, &w, &h) == 4) {
+                long dx = labs((long)x - bounds.x), dy = labs((long)y - bounds.y);
+                long dw = labs((long)w - bounds.w), dh = labs((long)h - bounds.h);
+                pending.score = (dx + dy) * 8 + dw + dh;
+                /* Generous enough for rounding, tight enough that a genuinely
+                 * different monitor never wins. */
+                pending.found = (dx <= 4 && dy <= 4 && dw <= 8 && dh <= 8);
+            }
+        } else if (current && !strncmp(cursor, "Scale:", 6)) {
+            (void)sscanf(cursor + 6, " %lf", &pending.scale);
+        } else if (current && !strncmp(cursor, "HDR ICC profile:", 16)) {
+            SDL_strlcpy(pending.hdr_icc_path, cursor + 16, sizeof(pending.hdr_icc_path));
+            kwin_trim(pending.hdr_icc_path);
+            if (!strcmp(pending.hdr_icc_path, "none")) pending.hdr_icc_path[0] = '\0';
+        } else if (current && !strncmp(cursor, "ICC profile:", 12)) {
+            SDL_strlcpy(pending.icc_path, cursor + 12, sizeof(pending.icc_path));
+            kwin_trim(pending.icc_path);
+            if (!strcmp(pending.icc_path, "none")) pending.icc_path[0] = '\0';
+        } else if (current && !strncmp(cursor, "HDR:", 4)) {
+            pending.hdr = strstr(cursor, "enabled") != NULL;
+        } else if (current && !strncmp(cursor, "SDR brightness:", 15)) {
+            (void)sscanf(cursor + 15, " %d", &pending.sdr_brightness);
+        }
+    }
+    if (current && pending.enabled) {
+        enabled_count++;
+        sole_enabled = pending;
+    }
+    if (current && pending.found && (best_score < 0 || pending.score < best_score))
+        best = pending;
+    pclose(pipe);
+    /* Wayland normalizes an application's coordinates to the sole active
+     * output, while kscreen-doctor can retain that output's old multi-monitor
+     * origin. Geometry cannot match in that valid configuration. A sole
+     * enabled output is unambiguous, so use it directly. */
+    if (best_score < 0 && enabled_count == 1) {
+        best = sole_enabled;
+        best.found = true;
+    }
+    *state = best;
+    return state->found;
+}
+
+static uint32_t kwin_hdr_surface_reference(SDL_DisplayID display)
+{
+    KWinOutputState output;
+    double scale;
+    double reference;
+    if (!kwin_output_state(display, &output) || output.sdr_brightness <= 0)
+        return 203;
+    scale = output.scale;
+    if (!isfinite(scale) || scale <= 0.0)
+        scale = SDL_GetDisplayContentScale(display);
+    if (!isfinite(scale) || scale <= 0.0) scale = 1.0;
+    /* Plasma currently applies the output's SDR-white anchor in logical
+     * surface units. Compensating by the output content scale keeps absolute
+     * PQ patches invariant when either the HDR brightness slider or display
+     * scaling changes. This was verified at both 230 and 417 nit settings on
+     * the same HDR output. */
+    reference = output.sdr_brightness * (double)scale;
+    if (reference < 1.0) reference = 1.0;
+    if (reference > 10000.0) reference = 10000.0;
+    SDL_Log("KWin HDR reference: SDR white %d, content scale %.3f, surface reference %.0f",
+            output.sdr_brightness, (double)scale, reference);
+    return (uint32_t)lround(reference);
+}
+#endif
+
 static bool update_renderer_hdr_state(void)
 {
     SDL_PropertiesID renderer_props;
+    SDL_Colorspace output_colorspace;
     float sdr_white_scale = 1.0f;
 
 #ifdef _WIN32
@@ -2220,6 +2612,9 @@ static bool update_renderer_hdr_state(void)
     if (!app.renderer) return false;
     renderer_props = SDL_GetRendererProperties(app.renderer);
     if (!renderer_props) return false;
+    output_colorspace = (SDL_Colorspace)SDL_GetNumberProperty(
+        renderer_props, SDL_PROP_RENDERER_OUTPUT_COLORSPACE_NUMBER,
+        SDL_COLORSPACE_SRGB);
     app.hdr_active = SDL_GetBooleanProperty(renderer_props, SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN, false);
 #ifdef _WIN32
     /* SDL derives this flag from its dynamic HDR-headroom property. Some
@@ -2228,6 +2623,24 @@ static bool update_renderer_hdr_state(void)
      * output description reflects the actual monitor pipeline in that case. */
     if (app.hdr && !app.hdr_active && windows_window_hdr_enabled(app.window))
         app.hdr_active = true;
+#else
+    /* Same gap, other compositor. KWin does not always report HDR back to a
+     * client through the colour-management protocol, so SDL's flag can stay
+     * false while the panel is genuinely being driven in HDR - the Companion
+     * then reported "HDR inactive" for a display KWin lists as HDR: enabled.
+     * The compositor's own view of the output settles it. */
+    if (app.hdr && output_colorspace != SDL_COLORSPACE_HDR10) {
+        SDL_SetError("Renderer %s returned colorspace 0x%08x instead of HDR10 PQ",
+                     app.renderer_name[0] ? app.renderer_name : "unknown",
+                     (unsigned int)output_colorspace);
+        app.hdr_active = false;
+        return false;
+    }
+    if (app.hdr && !app.hdr_active) {
+        KWinOutputState output;
+        if (kwin_output_state(app.selected_display_id, &output) && output.hdr)
+            app.hdr_active = true;
+    }
 #endif
     if (app.hdr) {
         sdr_white_scale = SDL_GetFloatProperty(renderer_props, SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT, 1.0f);
@@ -2278,6 +2691,19 @@ static SDL_Texture *create_patch_texture(bool hdr)
     return texture;
 }
 
+/* Windows presents HDR through its own swapchain, so the SDL renderer there
+ * keeps the scRGB-linear surface it has always used and the D3D path is
+ * untouched. Everywhere else the SDL renderer IS the HDR output, and it has to
+ * carry PQ because that is what the patch values are. */
+static SDL_Colorspace colorspace_for_hdr(void)
+{
+#ifdef _WIN32
+    return SDL_COLORSPACE_SRGB_LINEAR;
+#else
+    return SDL_COLORSPACE_HDR10;
+#endif
+}
+
 static bool try_create_renderer(bool hdr, const char *driver)
 {
     SDL_PropertiesID props;
@@ -2287,13 +2713,40 @@ static bool try_create_renderer(bool hdr, const char *driver)
     if (!props) return false;
     SDL_SetPointerProperty(props, SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, app.window);
     SDL_SetNumberProperty(props, SDL_PROP_RENDERER_CREATE_PRESENT_VSYNC_NUMBER, 1);
+    /* Ask for a real PQ surface, not a linear one.
+     *
+     * Patch values are already PQ/BT.2020 - the Windows path presents them
+     * through an HDR10 swapchain and hands them over untouched. Requesting
+     * SDL_COLORSPACE_SRGB_LINEAR here instead meant PQ codes were written into
+     * a LINEAR surface, so the ladder came out roughly twenty times too bright
+     * and clipped at the panel's peak from about 38% stimulus upward - two
+     * thirds of a greyscale measuring the same luminance.
+     *
+     * SDL_COLORSPACE_HDR10 is the same colorspace the Windows swapchain uses
+     * (DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020), and SDL tags the Wayland
+     * surface with it through the colour-management protocol, so KWin knows
+     * the content is PQ and passes it through rather than reinterpreting it.
+     * Not every backend offers it - SDL's "gpu" renderer refuses it outright -
+     * so the caller's driver preference decides, and create_renderer falls
+     * back to linear only if nothing can present PQ. */
     SDL_SetNumberProperty(props, SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER,
-                          hdr ? SDL_COLORSPACE_SRGB_LINEAR : SDL_COLORSPACE_SRGB);
+                          hdr ? colorspace_for_hdr() : SDL_COLORSPACE_SRGB);
     if (driver) SDL_SetStringProperty(props, SDL_PROP_RENDERER_CREATE_NAME_STRING, driver);
     app.renderer = SDL_CreateRendererWithProperties(props);
     SDL_DestroyProperties(props);
     if (!app.renderer) return false;
     app.hdr = hdr;
+#ifndef _WIN32
+    /* The Vulkan swapchain uses VK_COLOR_SPACE_PASS_THROUGH_EXT on Wayland,
+     * leaving this application as the sole owner of the surface description.
+     * Attach BT.2020/PQ before the first frame reaches KWin. */
+    if (!pgen_wayland_set_hdr_surface(
+            app.window, hdr,
+            hdr ? kwin_hdr_surface_reference(app.selected_display_id) : 0)) {
+        destroy_renderer();
+        return false;
+    }
+#endif
     {
         SDL_PropertiesID renderer_props = SDL_GetRendererProperties(app.renderer);
         const char *name = SDL_GetStringProperty(renderer_props, SDL_PROP_RENDERER_NAME_STRING, "unknown");
@@ -2359,7 +2812,7 @@ static bool create_renderer(bool hdr)
     size_t index;
     char attempt_error[256];
 #endif
-    char last_error[512] = "No HDR renderer was available";
+    char last_error[512] = "";
 
     if (!hdr) return try_create_renderer(false, NULL);
 #ifdef _WIN32
@@ -2386,16 +2839,18 @@ static bool create_renderer(bool hdr)
     }
     for (index = 0; index < SDL_arraysize(hdr_drivers); index++) {
         const char *driver = hdr_drivers[index];
+        char attempt_summary[320];
         if (try_create_renderer(true, driver)) return true;
         attempt_error[0] = '\0';
         if (SDL_GetError() && SDL_GetError()[0])
             SDL_strlcpy(attempt_error, SDL_GetError(), sizeof(attempt_error));
         else
             SDL_strlcpy(attempt_error, "create failed", sizeof(attempt_error));
-        if (driver && driver[0])
-            SDL_snprintf(last_error, sizeof(last_error), "%s: %s", driver, attempt_error);
-        else
-            SDL_snprintf(last_error, sizeof(last_error), "default: %s", attempt_error);
+        SDL_snprintf(attempt_summary, sizeof(attempt_summary), "%s: %s",
+                     driver && driver[0] ? driver : "default", attempt_error);
+        SDL_Log("Native HDR renderer attempt failed: %s", attempt_summary);
+        if (last_error[0]) SDL_strlcat(last_error, "; ", sizeof(last_error));
+        SDL_strlcat(last_error, attempt_summary, sizeof(last_error));
     }
 #endif
 
@@ -2403,7 +2858,8 @@ static bool create_renderer(bool hdr)
      * the failure result so the server does not measure an SDR fallback. */
     try_create_renderer(false, NULL);
     if (app.renderer) render_alignment();
-    SDL_SetError("HDR renderer unavailable: %s", last_error);
+    SDL_SetError("HDR renderer unavailable: %s",
+                 last_error[0] ? last_error : "No HDR renderer was available");
     return false;
 }
 
@@ -2835,7 +3291,16 @@ static void companion_run_build(const char *poll_response)
         }
         cleaned[out] = '\0';
 #ifdef _WIN32
-        SDL_snprintf(command, sizeof(command), "\"\"%s\" %s -O \"%s\" \"%s\"\"",
+        /* A GUI-subsystem process launches system() in a visible console. Use
+           that console as progress UI instead of presenting an unexplained
+           colprof window that looks safe to close. colprof's own progress is
+           left visible below these instructions until the fit completes. */
+        SDL_snprintf(command, sizeof(command),
+                     "title PGenerator+ ICC Profile Build & "
+                     "echo. & echo PGenerator+ is building your ICC profile. & "
+                     "echo This calculation was offloaded from the PGenerator device. & "
+                     "echo Please do not close this window. It will close automatically when the build finishes. & "
+                     "echo. & \"%s\" %s -O \"%s\" \"%s\"",
                      tool, cleaned, icc_path, base_path);
 #else
         SDL_snprintf(command, sizeof(command), "\"%s\" %s -O \"%s\" \"%s\"",
@@ -2964,12 +3429,36 @@ static void poll_server(void)
                                                     SDL_COLORSPACE_UNKNOWN)
             : SDL_COLORSPACE_UNKNOWN;
         const char *driver = SDL_GetCurrentVideoDriver();
-        if (colorspace == SDL_COLORSPACE_SRGB_LINEAR)
+        if (colorspace == SDL_COLORSPACE_HDR10)
+            SDL_strlcpy(swapchain_color_space, "hdr10-pq", sizeof(swapchain_color_space));
+        else if (colorspace == SDL_COLORSPACE_SRGB_LINEAR)
             SDL_strlcpy(swapchain_color_space, "scrgb-linear", sizeof(swapchain_color_space));
         else if (colorspace == SDL_COLORSPACE_SRGB)
             SDL_strlcpy(swapchain_color_space, "srgb", sizeof(swapchain_color_space));
         if (driver && driver[0])
             SDL_strlcpy(presentation_mode, driver, sizeof(presentation_mode));
+    }
+    /* Ask KWin what it has assigned to this output, and which of its two slots
+     * applies. Plasma 6.7 keeps SDR and HDR assignments apart, and an HDR
+     * display routinely carries an HDR profile with an EMPTY SDR one - reading
+     * only iccProfilePath is what made a configured display report "no profile
+     * loaded". Also settles HDR when the colour-management protocol did not. */
+    {
+        KWinOutputState output;
+        if (kwin_output_state(app.selected_display_id, &output)) {
+            const char *path_in_use = output.hdr && output.hdr_icc_path[0]
+                ? output.hdr_icc_path : output.icc_path;
+            if (output.hdr) reported_hdr_active = true;
+            if (path_in_use && path_in_use[0]) {
+                const char *base = strrchr(path_in_use, '/');
+                SDL_strlcpy(active_profile, base ? base + 1 : path_in_use,
+                            sizeof(active_profile));
+                SDL_strlcpy(app.linux_profile_path, path_in_use,
+                            sizeof(app.linux_profile_path));
+            } else {
+                app.linux_profile_path[0] = '\0';
+            }
+        }
     }
 #endif
     /* Carry the reason a requested transform is not running, so the server does
@@ -3465,6 +3954,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                                  NULL);
         return SDL_APP_FAILURE;
     }
+    /* Calibration patches must not be altered by the desktop's idle dimming
+     * policy during a long series. On Wayland SDL implements this with the
+     * compositor idle-inhibit protocol for the lifetime of this window. */
+    SDL_DisableScreenSaver();
 #ifdef _WIN32
     set_windows_window_icon();
 #else
@@ -3590,6 +4083,13 @@ SDL_AppResult SDL_AppIterate(void *appstate)
      * HDR patch every refresh, as dogegen does, so the desktop compositor can
      * never surface an untouched or stale buffer after a Present rotation. */
     if (state->hdr_swapchain && !render_current_frame()) return SDL_APP_FAILURE;
+#else
+    /* Vulkan swapchains rotate multiple images too. Keep every image filled
+     * with the active patch so KWin cannot present an older frame after a
+     * series advances. Focus and expose events used to hide this by causing an
+     * extra redraw, which is why Alt-Tab appeared to repair the patch. */
+    if (state->hdr && state->renderer && !render_current_frame())
+        return SDL_APP_FAILURE;
 #endif
     SDL_Delay(5);
     return state->quit ? SDL_APP_SUCCESS : SDL_APP_CONTINUE;

@@ -35,8 +35,11 @@ The WebUI parses these, so they do not change casually:
   Companion reports against the newest release tag here and says so when the
   Companion is behind.
 - **Asset filenames** are exactly the three above, fixed across releases. The
-  WebUI links to `releases/latest/download/<asset>`, which GitHub redirects to
-  whichever release is newest, so the links never need updating.
+  WebUI opens `releases/latest` — the release *page*, not an asset — so the link
+  never needs updating and the download originates from GitHub over https.
+  Chrome and Edge judge a download by the origin of the page that started it, so
+  a direct asset link from the plain-http WebUI is flagged insecure no matter how
+  the asset itself is served.
 
 ## Pairing: these downloads are not tied to any one PGenerator+
 
@@ -121,17 +124,33 @@ file from `Common/../favicon.ico`. Keep `favicon.ico` at the repository root.
 **Linux (native)**
 
 - A C compiler (these commands were verified with gcc).
-- SDL3 development files, discoverable through `pkg-config`:
+- SDL3 and Wayland client development files, discoverable through `pkg-config`.
+  The Companion binds the Wayland colour-management protocol directly, so
+  `wayland-client` is a build dependency alongside SDL3:
 
   ```sh
-  sudo apt install build-essential pkg-config libsdl3-dev     # Debian/Ubuntu
-  sudo dnf install gcc pkgconf-pkg-config SDL3-devel          # Fedora
+  sudo apt install build-essential pkg-config libsdl3-dev libwayland-dev   # Debian/Ubuntu
+  sudo dnf install gcc pkgconf-pkg-config SDL3-devel wayland-devel         # Fedora
   ```
 
-  Confirm it resolves before building:
+  Confirm both resolve before building:
 
   ```sh
-  pkg-config --modversion sdl3
+  pkg-config --modversion sdl3 wayland-client
+  ```
+
+- For a binary that matches the shipped one, a **patched** SDL3 rather than the
+  distribution package. `Linux/SDL3-vulkan-native-hdr10.patch` applies to SDL's
+  Vulkan renderer and does two things the stock library does not: it leaves the
+  swapchain colour space as pass-through so the Companion's own colour-management
+  surface is the only HDR description attached, and it stops the HDR10 shader
+  decoding PQ into sRGB when the output is already a PQ swapchain. Building
+  against stock SDL3 compiles and runs, but native PQ patches on Plasma are
+  wrong — which is why the release archive bundles `libSDL3.so.0` and the
+  Companion is documented as requiring the bundled library.
+
+  ```sh
+  git -C SDL apply /path/to/Linux/SDL3-vulkan-native-hdr10.patch
   ```
 
 **Windows (cross-compiled from Linux)**
@@ -159,12 +178,15 @@ file from `Common/../favicon.ico`. Keep `favicon.ico` at the repository root.
 
 Run these from the repository root.
 
-**Patch Companion:**
+**Patch Companion** — `pgen-color-management-v1-protocol.c` is the generated
+Wayland protocol glue for the colour-management interface the Companion binds,
+and its client header is beside it in `Common/`, so it needs no extra include
+path. Leaving the protocol source out fails the link on `wp_color_manager_v1`:
 
 ```sh
-gcc -O2 -std=gnu11 -Wall -Wextra $(pkg-config --cflags sdl3) \
-    Common/pgen-icc-companion.c \
-    -o PGenICCCompanion $(pkg-config --libs sdl3) -lm
+gcc -O2 -std=gnu11 -Wall -Wextra $(pkg-config --cflags sdl3 wayland-client) \
+    Common/pgen-icc-companion.c Common/pgen-color-management-v1-protocol.c \
+    -o PGenICCCompanion $(pkg-config --libs sdl3 wayland-client) -lm
 ```
 
 **Profile Loader** — `-ICommon` is what lets it find
@@ -177,10 +199,14 @@ gcc -O2 -std=gnu11 -Wall -Wextra -ICommon $(pkg-config --cflags sdl3) \
     -o PGenProfileLoader $(pkg-config --libs sdl3) -lm
 ```
 
-Both commands were run against SDL3 3.4.2 and produced a clean build. Both
-link only SDL3 and libm. The Profile Loader additionally *runs*
-`kscreen-doctor` (part of KDE Plasma) or `colormgr` (part of colord) if either
-is present at run time; neither is a build dependency.
+Both commands were run against SDL3 3.4.2 and wayland-client 1.24.0 and
+produced a clean build with no warnings. The Companion links SDL3,
+wayland-client and libm; the Profile Loader links only SDL3 and libm. The
+Profile Loader additionally *runs* `kscreen-doctor` (part of KDE Plasma) or
+`colormgr` (part of colord) if either is present at run time; neither is a build
+dependency. On Plasma it reads and writes the SDR and HDR profile slots
+separately (`iccProfilePath` / `hdrIccProfilePath`), because an HDR output
+otherwise reports no profile even when its HDR slot is populated.
 
 ### Building for Windows
 
