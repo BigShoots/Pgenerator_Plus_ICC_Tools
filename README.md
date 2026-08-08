@@ -10,10 +10,11 @@ source they are built from is in this repository.
   display, in SDR and in HDR, then keeps checking that it is still the profile
   the display is actually using.
 
-The PGenerator+ WebUI links straight to the latest release here. It is served
-over plain http, so a browser flags any program it hands out itself as
-insecure; the release downloads come over https from GitHub instead, which is
-the whole reason this repository exists.
+The PGenerator+ WebUI links straight to the latest release here. The WebUI is
+served over plain http, and browsers judge a download by the origin of the page
+that started it, so anything the unit served itself would be flagged insecure.
+Releases come over https from GitHub instead, which is the whole reason this
+repository exists.
 
 ## Downloads
 
@@ -71,9 +72,8 @@ or on the command line:
     PGenICCCompanion --server=http://192.0.2.10
 ```
 
-An explicitly configured `SERVER` always wins over discovery. A copy
-downloaded directly from a PGenerator+ unit still arrives fully paired and
-skips all of this.
+An explicitly configured `SERVER` always wins over discovery — use it where
+mDNS is blocked, or where more than one unit shares a network.
 
 ## Building from source
 
@@ -83,7 +83,7 @@ Everything below is optional — the releases above are built exactly this way.
 
 ```
 Common/     the single Patch Companion source, its generated icon header and
-            the script that regenerates it, and the pairing-template config
+            the script that regenerates it, and the template config
 Windows/    Windows-only source: the Profile Loader, resource scripts,
             manifests and the installer script
 Linux/      Linux-only source: the Profile Loader, plus its generated font
@@ -277,11 +277,10 @@ from the `Windows/` directory with a staging tree beside this repository:
   `PGenICCCompanion.template.conf` for the pairing config it stores
   uncompressed
 
-That last file is why one installer serves both routes. A PGenerator+ unit
-personalises the fixed-width slots inside the built `.exe` when a user
-downloads a paired copy from it; the released installer still carries the
-untouched slot text, which the Companion recognises as "no address, no token"
-and falls through to discovery and approval.
+That last file ships with its `SERVER`/`TOKEN` slots holding fixed-width
+placeholder text. The Companion recognises the untouched placeholders as "no
+address, no token" and falls through to discovery and approval, which is how a
+release download configures itself with nothing filled in ahead of time.
 
 ### Regenerating the generated headers
 
