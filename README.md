@@ -1,187 +1,139 @@
 # PGenerator+ ICC Tools
 
-This is where the PGenerator+ ICC tools are **released**. Downloads for every
-supported platform are on the [Releases](../../releases/latest) page, and the
-source they are built from is in this repository.
+Desktop tools for creating and loading ICC profiles with PGenerator+:
 
-- **Patch Companion** — displays the measurement patches on the computer being
-  profiled, driven over the network by a PGenerator+ unit.
-- **Profile Loader** — installs a finished ICC profile and applies it to a
-  display, in SDR and in HDR, then keeps checking that it is still the profile
-  the display is actually using.
+- **Patch Companion** displays measurement patches on the computer being
+  profiled. A PGenerator+ unit controls it over the network.
+- **Profile Loader** installs an ICC profile, applies it to a display in SDR or
+  HDR, and checks that the display continues to use it.
 
-The PGenerator+ WebUI links straight to the latest release here. The WebUI is
-served over plain http, and browsers judge a download by the origin of the page
-that started it, so anything the unit served itself would be flagged insecure.
-Releases come over https from GitHub instead, which is the whole reason this
-repository exists.
+Download current builds from the [latest release](../../releases/latest).
 
 ## Downloads
 
-| Asset | For | Contains |
+| Asset | Platform | Contents |
 | --- | --- | --- |
-| `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows 10/11 x64 | Installer: Patch Companion, Profile Loader, ArgyllCMS `colprof`/`profcheck`, Start Menu entries and an uninstaller |
-| `PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip` | Windows 10/11 x64 | The same programs, extracted and run in place, with nothing installed |
-| `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux, glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `colprof`/`profcheck`, bundled SDL3 |
+| `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows 10/11 x64 | Installer for Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, Start Menu entries, and the uninstaller |
+| `PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip` | Windows 10/11 x64 | Portable versions of the same programs |
+| `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux with glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, and bundled SDL3 |
 
-Windows may show a SmartScreen warning, because these builds are not
-code-signed.
+The Windows builds are not code-signed, so Windows may show a SmartScreen
+warning.
 
-### Release naming — a contract, not a convention
+### Release naming
 
-The WebUI parses these, so they do not change casually:
+The PGenerator+ WebUI relies on the following names:
 
-- **Tags** are `v<major>.<minor>.<patch>`, e.g. `v1.4.0`, and match the Patch
-  Companion's own reported version. The WebUI compares the version a connected
-  Companion reports against the newest release tag here and says so when the
-  Companion is behind.
-- **Asset filenames** are exactly the three above, fixed across releases. The
-  WebUI opens `releases/latest` — the release *page*, not an asset — so the link
-  never needs updating and the download originates from GitHub over https.
-  Chrome and Edge judge a download by the origin of the page that started it, so
-  a direct asset link from the plain-http WebUI is flagged insecure no matter how
-  the asset itself is served.
+- Tags use `v<major>.<minor>.<patch>`, for example `v1.4.0`. The tag must match
+  the version reported by Patch Companion. The WebUI compares that version
+  with the latest release tag and reports when the companion is out of date.
+- Asset filenames remain exactly as listed in the downloads table.
+- The WebUI links to `releases/latest`, not directly to an asset. This keeps the
+  link stable and starts the download from GitHub over HTTPS. Downloads started
+  directly by the PGenerator+ HTTP WebUI may otherwise be flagged as insecure
+  by Chrome or Edge.
 
-## Pairing: these downloads are not tied to any one PGenerator+
+## Pairing with PGenerator+
 
-A release asset is the same file for everybody, so unlike a copy downloaded
-from a PGenerator+ unit it cannot arrive knowing which unit it belongs to. It
-works it out instead:
+Release builds are not configured for a specific PGenerator+ unit. Patch
+Companion discovers and pairs with a unit when first started:
 
-1. **Finding the unit.** PGenerator+ answers to the name `pgenerator.local` —
-   it runs its own mDNS responder, so this does not depend on the unit's other
-   services. The Companion resolves that name at startup.
-2. **Getting permission.** It then asks the unit to pair and shows a six-digit
-   code on screen. The same request, with the same code, appears in the
-   PGenerator+ WebUI next to the Patch Companion status, with Approve and Deny
-   buttons. Approving hands the Companion its token, once; it saves it and
-   never asks again.
+1. It resolves `pgenerator.local` through mDNS.
+2. It sends a pairing request and displays a six-digit code.
+3. The PGenerator+ WebUI shows the same request and code beside the Patch
+   Companion status.
+4. After the request is approved in the WebUI, the unit returns a token. Patch
+   Companion saves the token for later connections.
 
-Nothing is handed out to a program that merely asks: a human has to approve
-the request in the WebUI, and the code is minted by the unit so that a request
-cannot pick a code to impersonate another machine's.
+The unit generates the pairing code, and no token is issued until the request
+is approved.
 
-If the name cannot be resolved — several PGenerator+ units on one network,
-a routed network, or mDNS blocked — override it either way:
+If mDNS is unavailable, or more than one PGenerator+ is present, set the server
+address in `PGenPatchCompanion.conf` beside the executable:
 
-```
-PGenPatchCompanion.conf, beside the executable:
-    SERVER=http://192.0.2.10
-
-or on the command line:
-    PGenPatchCompanion --server=http://192.0.2.10
+```ini
+SERVER=http://192.0.2.10
 ```
 
-An explicitly configured `SERVER` always wins over discovery — use it where
-mDNS is blocked, or where more than one unit shares a network.
+Alternatively, pass it on the command line:
 
-## Building from source
-
-Everything below is optional — the releases above are built exactly this way.
-
-### Layout
-
-```
-Common/     the single Patch Companion source, its generated icon header and
-            the script that regenerates it, and the template config
-Windows/    Windows-only source: the Profile Loader, resource scripts,
-            manifests and the installer script
-Linux/      Linux-only source: the Profile Loader, plus its generated font
-            header and the script that regenerates it
-licenses/   third-party licences that must travel with the built artifacts
-favicon.ico the shared application artwork
+```sh
+PGenPatchCompanion --server=http://192.0.2.10
 ```
 
-**The Patch Companion is one source file, compiled for both platforms.**
-`Common/pgen-icc-companion.c` builds unmodified on Windows and on Linux, with
-the platform differences behind `#ifdef _WIN32`. It is not duplicated into
-`Windows/` or `Linux/`: two copies of the same program would drift apart the
-first time either one changed, so there is exactly one file and both builds
-compile it.
+An explicitly configured server takes precedence over discovery.
 
-**The Profile Loader is genuinely two separate programs.** The Windows one
-(`Windows/pgen-profile-loader.c`) is a Win32 application built on the Windows
-colour-management APIs. The Linux one (`Linux/pgen-profile-loader-linux.c`) is
-drawn with SDL3 and talks to KWin or colord. They share a workflow, not code,
-so unlike the Companion they live apart on purpose.
+## Source layout
 
-Two headers are generated and checked in rather than built at compile time:
+```text
+Common/     Shared Patch Companion source, generated icon header, generator,
+            Wayland protocol files, and configuration template
+Windows/    Windows Profile Loader source, resources, manifests, and installer
+Linux/      Linux Profile Loader source, generated font header, and generator
+licenses/   Third-party licences included with distributed builds
+favicon.ico Shared application artwork
+```
 
-| File | Regenerated by | Used by |
+`Common/pgen-icc-companion.c` is compiled unchanged on Linux and Windows.
+Platform-specific code is selected with `#ifdef _WIN32`.
+
+The Profile Loader has separate implementations:
+
+- `Windows/pgen-profile-loader.c` uses the Windows colour-management APIs.
+- `Linux/pgen-profile-loader-linux.c` uses SDL3 and communicates with KWin or
+  colord.
+
+The following generated headers are committed to the repository:
+
+| File | Generator | Used by |
 | --- | --- | --- |
-| `Common/pgen-icc-companion-icon.h` | `Common/make-icon-header.py`, from `favicon.ico` | Companion (Linux) and Profile Loader (Linux) |
-| `Linux/pgen-ui-font.h` | `Linux/make-font-header.py`, from the DejaVu fonts | Profile Loader (Linux) |
+| `Common/pgen-icc-companion-icon.h` | `Common/make-icon-header.py`, using `favicon.ico` | Linux Patch Companion and Linux Profile Loader |
+| `Linux/pgen-ui-font.h` | `Linux/make-font-header.py`, using DejaVu fonts | Linux Profile Loader |
 
-Committing them means **building the tools needs no Pillow and no font
-files** — those are only needed to regenerate the headers after changing the
-artwork or the type. Windows takes its icon from the resource script instead,
-which is why `Windows/pgen-icc-companion.rc` and `Windows/pgen-profile-loader.rc`
-both point at `../favicon.ico`, and why `make-icon-header.py` reads the same
-file from `Common/../favicon.ico`. Keep `favicon.ico` at the repository root.
+Pillow and the DejaVu font files are needed only when regenerating these
+headers. Keep `favicon.ico` at the repository root because the generators and
+Windows resource scripts refer to it there.
 
-### Prerequisites
+## Linux build
 
-**Linux (native)**
+### Requirements
 
-- A C compiler (these commands were verified with gcc).
-- SDL3 and Wayland client development files, discoverable through `pkg-config`.
-  The Companion binds the Wayland colour-management protocol directly, so
-  `wayland-client` is a build dependency alongside SDL3:
+- A C compiler. The commands below use GCC.
+- SDL3 and Wayland client development files available through `pkg-config`.
 
-  ```sh
-  sudo apt install build-essential pkg-config libsdl3-dev libwayland-dev   # Debian/Ubuntu
-  sudo dnf install gcc pkgconf-pkg-config SDL3-devel wayland-devel         # Fedora
-  ```
+Debian or Ubuntu:
 
-  Confirm both resolve before building:
+```sh
+sudo apt install build-essential pkg-config libsdl3-dev libwayland-dev
+```
 
-  ```sh
-  pkg-config --modversion sdl3 wayland-client
-  ```
+Fedora:
 
-- For a binary that matches the shipped one, a **patched** SDL3 rather than the
-  distribution package. `Linux/SDL3-vulkan-native-hdr10.patch` applies to SDL's
-  Vulkan renderer and does two things the stock library does not: it leaves the
-  swapchain colour space as pass-through so the Companion's own colour-management
-  surface is the only HDR description attached, and it stops the HDR10 shader
-  decoding PQ into sRGB when the output is already a PQ swapchain. Building
-  against stock SDL3 compiles and runs, but native PQ patches on Plasma are
-  wrong — which is why the release archive bundles `libSDL3.so.0` and the
-  Companion is documented as requiring the bundled library.
+```sh
+sudo dnf install gcc pkgconf-pkg-config SDL3-devel wayland-devel
+```
 
-  ```sh
-  git -C SDL apply /path/to/Linux/SDL3-vulkan-native-hdr10.patch
-  ```
+Check that both libraries are available:
 
-**Windows (cross-compiled from Linux)**
+```sh
+pkg-config --modversion sdl3 wayland-client
+```
 
-- MinGW-w64:
+Release builds use a patched SDL3. Apply
+`Linux/SDL3-vulkan-native-hdr10.patch` to the SDL source tree:
 
-  ```sh
-  sudo apt install gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64   # Debian/Ubuntu
-  ```
+```sh
+git -C SDL apply /path/to/Linux/SDL3-vulkan-native-hdr10.patch
+```
 
-- The official SDL3 **MinGW devel** package (system SDL3 is not usable for a
-  mingw cross-build). Fetch and unpack it — do not commit the tarball or the
-  extracted tree:
+The patch leaves the Vulkan swapchain colour space in pass-through mode and
+prevents SDL's HDR10 shader from decoding PQ into sRGB when the output is
+already a PQ swapchain. A stock SDL3 build runs, but produces incorrect native
+PQ patches on Plasma. The Linux release therefore includes `libSDL3.so.0`.
 
-  ```sh
-  curl -fLO https://github.com/libsdl-org/SDL/releases/download/release-3.4.14/SDL3-devel-3.4.14-mingw.tar.gz
-  tar xzf SDL3-devel-3.4.14-mingw.tar.gz
-  export SDL3=$PWD/SDL3-3.4.14/x86_64-w64-mingw32
-  ```
+### Patch Companion
 
-  `$SDL3/include` and `$SDL3/lib` are what the commands below use;
-  `$SDL3/bin/SDL3.dll` is what you ship beside the Companion executable.
-
-### Building on Linux
-
-Run these from the repository root.
-
-**Patch Companion** — `pgen-color-management-v1-protocol.c` is the generated
-Wayland protocol glue for the colour-management interface the Companion binds,
-and its client header is beside it in `Common/`, so it needs no extra include
-path. Leaving the protocol source out fails the link on `wp_color_manager_v1`:
+Run from the repository root:
 
 ```sh
 gcc -O2 -std=gnu11 -Wall -Wextra $(pkg-config --cflags sdl3 wayland-client) \
@@ -189,9 +141,10 @@ gcc -O2 -std=gnu11 -Wall -Wextra $(pkg-config --cflags sdl3 wayland-client) \
     -o PGenPatchCompanion $(pkg-config --libs sdl3 wayland-client) -lm
 ```
 
-**Profile Loader** — `-ICommon` is what lets it find
-`pgen-icc-companion-icon.h`; `pgen-ui-font.h` is beside the source file and
-needs no extra include path:
+`Common/pgen-color-management-v1-protocol.c` provides the generated Wayland
+colour-management protocol glue and must be included in the link.
+
+### Profile Loader
 
 ```sh
 gcc -O2 -std=gnu11 -Wall -Wextra -ICommon $(pkg-config --cflags sdl3) \
@@ -199,24 +152,41 @@ gcc -O2 -std=gnu11 -Wall -Wextra -ICommon $(pkg-config --cflags sdl3) \
     -o PGenProfileLoader $(pkg-config --libs sdl3) -lm
 ```
 
-Both commands were run against SDL3 3.4.2 and wayland-client 1.24.0 and
-produced a clean build with no warnings. The Companion links SDL3,
-wayland-client and libm; the Profile Loader links only SDL3 and libm. The
-Profile Loader additionally *runs* `kscreen-doctor` (part of KDE Plasma) or
-`colormgr` (part of colord) if either is present at run time; neither is a build
-dependency. On Plasma it reads and writes the SDR and HDR profile slots
-separately (`iccProfilePath` / `hdrIccProfilePath`), because an HDR output
-otherwise reports no profile even when its HDR slot is populated.
+These commands have been tested with SDL3 3.4.2 and wayland-client 1.24.0.
+Patch Companion links SDL3, wayland-client, and libm. Profile Loader links SDL3
+and libm.
 
-### Building for Windows
+At runtime, Profile Loader uses `kscreen-doctor` on KDE Plasma or `colormgr`
+from colord when available. Neither is a build dependency. On Plasma it handles
+the SDR and HDR profile slots separately through `iccProfilePath` and
+`hdrIccProfilePath`.
 
-These are the exact commands that were run and verified, cross-compiling on
-Linux with MinGW-w64. Run them from the repository root, with `$SDL3` set as
-above.
+## Windows cross-build
 
-**Patch Companion** — compile the resource script first, with `Windows/` as
-the working directory so its `../favicon.ico` and `.manifest` references
-resolve, then compile and link the source against it:
+The Windows programs can be cross-compiled on Linux with MinGW-w64.
+
+Install the compiler and binutils on Debian or Ubuntu:
+
+```sh
+sudo apt install gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+```
+
+Download and unpack the official SDL3 MinGW development package. Do not commit
+the archive or extracted directory.
+
+```sh
+curl -fLO https://github.com/libsdl-org/SDL/releases/download/release-3.4.14/SDL3-devel-3.4.14-mingw.tar.gz
+tar xzf SDL3-devel-3.4.14-mingw.tar.gz
+export SDL3=$PWD/SDL3-3.4.14/x86_64-w64-mingw32
+```
+
+The build uses headers from `$SDL3/include`, libraries from `$SDL3/lib`, and
+the redistributable DLL at `$SDL3/bin/SDL3.dll`.
+
+### Patch Companion
+
+Run from the repository root. Build the resource file from `Windows/` so its
+relative icon and manifest paths resolve correctly.
 
 ```sh
 (cd Windows && x86_64-w64-mingw32-windres pgen-icc-companion.rc \
@@ -231,15 +201,17 @@ x86_64-w64-mingw32-gcc -O2 -std=gnu11 -DUNICODE -D_UNICODE \
     -luuid -lgdi32 -luser32 -lshell32 -ladvapi32 -lshlwapi -ldwmapi
 ```
 
-`-DSDL_MAIN_CALLBACK_STANDARD` is required: the source sets
-`SDL_MAIN_USE_CALLBACKS`, and without this define the link fails with an
-undefined reference to `WinMain`. `-municode` is required because `-DUNICODE`
-makes the SDL entry-point shim emit `wWinMain`. `IID_IDXGISwapChain3`/`4` need
-`-ldxguid`, not `-luuid`. Adding `-Wall` produces one harmless
-`-Wunused-function` note; it is not fatal and was left alone rather than
-edited into the shared source.
+`-DSDL_MAIN_CALLBACK_STANDARD` is required because the source defines
+`SDL_MAIN_USE_CALLBACKS`. `-municode` supplies the correct entry point for the
+Unicode build. `IID_IDXGISwapChain3` and `IID_IDXGISwapChain4` come from
+`-ldxguid`.
 
-**Profile Loader** — no SDL3, it is a plain Win32 application:
+Adding `-Wall` currently reports one non-fatal `-Wunused-function` warning in
+the shared source.
+
+### Profile Loader
+
+The Windows Profile Loader is a Win32 application and does not use SDL3.
 
 ```sh
 (cd Windows && x86_64-w64-mingw32-windres pgen-profile-loader.rc \
@@ -253,64 +225,60 @@ x86_64-w64-mingw32-gcc -O2 -std=gnu11 -DUNICODE -D_UNICODE \
     -lgdi32 -luser32 -ladvapi32 -lole32 -luuid
 ```
 
-`-luuid` provides `GUID_DEVCLASS_MONITOR`; without it the link fails with an
-undefined reference to that symbol.
+`-luuid` provides `GUID_DEVCLASS_MONITOR`.
 
-Both `.exe` files were confirmed with `file` to be PE32+ executables for
-64-bit Windows. Ship `$SDL3/bin/SDL3.dll` beside
-`PGeneratorPlusPatchCompanion.exe`; the Profile Loader needs no DLL.
+Both outputs are 64-bit Windows PE executables. Distribute
+`$SDL3/bin/SDL3.dll` beside `PGeneratorPlusPatchCompanion.exe`. Profile Loader
+does not require that DLL.
 
-### Installer
+## Windows installer
 
-`Windows/pgen-icc-tools-installer.nsi` is the NSIS script behind the released
-installer. It is built with `makensis` and, as written, expects to be invoked
-from the `Windows/` directory with a staging tree beside this repository:
+`Windows/pgen-icc-tools-installer.nsi` is the NSIS installer script. Run
+`makensis` from the `Windows/` directory with this staging layout:
 
-- `..\icc-companion\windows-x64\` holding `PGeneratorPlusPatchCompanion.exe`,
-  `PGenProfileLoader.exe`, `SDL3.dll`, `colprof.exe` and `profcheck.exe`
-- `..\icc-companion\SDL3-LICENSE.txt` and `..\icc-companion\ArgyllCMS-LICENSE.txt`
-  — note the path: the script reads them from that staging directory, not from
-  this repository's `licenses/`
-- `README.txt` and `PROFILE-LOADER-README.txt` in the working directory, the
-  end-user notes installed alongside the programs
-- `..\favicon.ico` for the installer and uninstaller icon, and
-  `PGenPatchCompanion.template.conf` for the pairing config it stores
-  uncompressed
+- `../icc-companion/windows-x64/` containing
+  `PGeneratorPlusPatchCompanion.exe`, `PGenProfileLoader.exe`, `SDL3.dll`,
+  `colprof.exe`, and `profcheck.exe`
+- `../icc-companion/SDL3-LICENSE.txt` and
+  `../icc-companion/ArgyllCMS-LICENSE.txt`
+- `README.txt` and `PROFILE-LOADER-README.txt` in the working directory
+- `../favicon.ico`
+- `PGenPatchCompanion.template.conf` in the working directory
 
-That last file ships with its `SERVER`/`TOKEN` slots holding fixed-width
-placeholder text. The Companion recognises the untouched placeholders as "no
-address, no token" and falls through to discovery and approval, which is how a
-release download configures itself with nothing filled in ahead of time.
+The installer stores the configuration template uncompressed. Its `SERVER` and
+`TOKEN` values contain fixed-width placeholders. Patch Companion treats
+unchanged placeholders as unset and starts discovery and pairing.
 
-### Regenerating the generated headers
+## Regenerating headers
 
-Only needed after changing `favicon.ico` or the font rendering; never needed
-to build the tools, since both headers are already committed.
+Regenerate the checked-in headers only after changing the application artwork
+or font rendering:
 
 ```sh
 python3 Common/make-icon-header.py     # requires Pillow
-python3 Linux/make-font-header.py      # requires Pillow and the DejaVu fonts
+python3 Linux/make-font-header.py      # requires Pillow and DejaVu fonts
 ```
 
-`make-icon-header.py` reads `favicon.ico` at the repository root and rewrites
-`Common/pgen-icc-companion-icon.h`. `make-font-header.py` reads the DejaVu
-TrueType fonts (checked at the usual Debian/Fedora font paths, overridable
-with `PGEN_FONT_DIR`) and rewrites `Linux/pgen-ui-font.h`. Both reproduce the
-committed headers byte for byte from the committed inputs.
+`make-icon-header.py` reads the root `favicon.ico` and writes
+`Common/pgen-icc-companion-icon.h`.
+
+`make-font-header.py` searches the standard Debian and Fedora locations for
+DejaVu TrueType fonts and writes `Linux/pgen-ui-font.h`. Set `PGEN_FONT_DIR` to
+use another font directory.
 
 ## Licensing
 
-The code in `Common/`, `Windows/` and `Linux/` is licensed under the GNU GPL;
-see `LICENSE`.
+Code in `Common/`, `Windows/`, and `Linux/` is licensed under the GNU GPL. See
+`LICENSE`.
 
-Third-party components are **not** included here as source or binaries — only
-their licences are, in `licenses/`, because they must travel with anything you
-build and distribute from this source:
+Third-party source and binaries are not stored in this repository. Their
+licence files are under `licenses/` and must be included with distributed
+builds as follows:
 
-| Component | Licence | Must travel with |
+| Component | Licence | Distribution requirement |
 | --- | --- | --- |
-| SDL3 | zlib (`licenses/SDL3-LICENSE.txt`) | Any build that links `SDL3.dll`/`libSDL3` — the Patch Companion on both platforms, and the Linux Profile Loader. |
-| DejaVu fonts | Bitstream Vera licence (`licenses/DejaVu-LICENSE.txt`) | The Linux Profile Loader, whose `pgen-ui-font.h` contains glyph bitmaps rendered from these fonts. No font file is redistributed, only the rendered glyphs. |
-| ArgyllCMS | AGPLv3 (`licenses/ArgyllCMS-LICENSE.txt`) | Any package bundling the ArgyllCMS `colprof`/`profcheck` binaries, as every release here does. Those binaries are not part of this repository. If you distribute them yourself, this licence and a source offer must go with them; source is at argyllcms.com. |
+| SDL3 | zlib, `licenses/SDL3-LICENSE.txt` | Include with builds that distribute `SDL3.dll` or `libSDL3`: Patch Companion on both platforms and Linux Profile Loader |
+| DejaVu fonts | Bitstream Vera, `licenses/DejaVu-LICENSE.txt` | Include with Linux Profile Loader because `pgen-ui-font.h` contains rendered DejaVu glyphs |
+| ArgyllCMS | AGPLv3, `licenses/ArgyllCMS-LICENSE.txt` | Include with packages containing `colprof` or `profcheck`, along with the required source offer; source is available from [argyllcms.com](https://www.argyllcms.com/) |
 
 `favicon.ico` is the PGenerator+ application artwork.
