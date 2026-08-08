@@ -13,7 +13,9 @@ obj/
 *.zip
 *.tar.gz
 
-# Locally built tool binaries
+# Locally built tool binaries. PGenICCCompanion is the Linux Companion's
+# retired name, kept so a build left over from before the rename stays ignored.
+PGenPatchCompanion
 PGenICCCompanion
 PGenProfileLoader
 PGeneratorPlusPatchCompanion

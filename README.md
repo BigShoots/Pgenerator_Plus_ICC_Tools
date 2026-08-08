@@ -65,11 +65,11 @@ If the name cannot be resolved — several PGenerator+ units on one network,
 a routed network, or mDNS blocked — override it either way:
 
 ```
-PGenICCCompanion.conf, beside the executable:
+PGenPatchCompanion.conf, beside the executable:
     SERVER=http://192.0.2.10
 
 or on the command line:
-    PGenICCCompanion --server=http://192.0.2.10
+    PGenPatchCompanion --server=http://192.0.2.10
 ```
 
 An explicitly configured `SERVER` always wins over discovery — use it where
@@ -186,7 +186,7 @@ path. Leaving the protocol source out fails the link on `wp_color_manager_v1`:
 ```sh
 gcc -O2 -std=gnu11 -Wall -Wextra $(pkg-config --cflags sdl3 wayland-client) \
     Common/pgen-icc-companion.c Common/pgen-color-management-v1-protocol.c \
-    -o PGenICCCompanion $(pkg-config --libs sdl3 wayland-client) -lm
+    -o PGenPatchCompanion $(pkg-config --libs sdl3 wayland-client) -lm
 ```
 
 **Profile Loader** — `-ICommon` is what lets it find
@@ -274,7 +274,7 @@ from the `Windows/` directory with a staging tree beside this repository:
 - `README.txt` and `PROFILE-LOADER-README.txt` in the working directory, the
   end-user notes installed alongside the programs
 - `..\favicon.ico` for the installer and uninstaller icon, and
-  `PGenICCCompanion.template.conf` for the pairing config it stores
+  `PGenPatchCompanion.template.conf` for the pairing config it stores
   uncompressed
 
 That last file ships with its `SERVER`/`TOKEN` slots holding fixed-width

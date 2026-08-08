@@ -63,6 +63,7 @@ typedef struct {
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <wayland-client.h>
 #include "pgen-color-management-v1-client-protocol.h"
@@ -75,7 +76,7 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#define APP_VERSION "1.4.5"
+#define APP_VERSION "1.4.7"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */
 #define PGEN_NEUTRAL_BLEND 0.06
@@ -89,9 +90,11 @@ typedef struct {
     struct wp_color_management_surface_v1 *surface;
     bool parametric;
     bool luminances;
+    bool mastering_metadata;
     bool pq;
     bool bt2020;
     bool absolute_intent;
+    bool absolute_no_adaptation_intent;
     bool description_ready;
     bool description_failed;
 } PgenWaylandColor;
@@ -105,6 +108,8 @@ static void pgen_cm_intent(void *data, struct wp_color_manager_v1 *manager,
     (void)manager;
     if (intent == WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE)
         state->absolute_intent = true;
+    else if (intent == WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE_NO_ADAPTATION)
+        state->absolute_no_adaptation_intent = true;
 }
 
 static void pgen_cm_feature(void *data, struct wp_color_manager_v1 *manager,
@@ -116,6 +121,8 @@ static void pgen_cm_feature(void *data, struct wp_color_manager_v1 *manager,
         state->parametric = true;
     else if (feature == WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES)
         state->luminances = true;
+    else if (feature == WP_COLOR_MANAGER_V1_FEATURE_SET_MASTERING_DISPLAY_PRIMARIES)
+        state->mastering_metadata = true;
 }
 
 static void pgen_cm_tf(void *data, struct wp_color_manager_v1 *manager,
@@ -211,7 +218,10 @@ static const struct wp_image_description_v1_listener pgen_description_listener =
 };
 
 static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
-                                         uint32_t reference_luminance)
+                                         uint32_t reference_luminance,
+                                         double mastering_min_luminance,
+                                         double mastering_max_luminance,
+                                         double max_cll, double max_fall)
 {
     SDL_PropertiesID properties;
     struct wl_surface *wl_surface;
@@ -259,7 +269,8 @@ static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
 
     if (!wayland_color.parametric || !wayland_color.luminances ||
         !wayland_color.pq || !wayland_color.bt2020 ||
-        !wayland_color.absolute_intent) {
+        (!wayland_color.absolute_intent &&
+         !wayland_color.absolute_no_adaptation_intent)) {
         return SDL_SetError("KWin lacks native BT.2020/PQ surface support");
     }
 
@@ -276,6 +287,27 @@ static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
         wp_image_description_creator_params_v1_set_luminances(
             creator, 0, 10000,
             reference_luminance ? reference_luminance : 203);
+        /* PQ always has a 10,000-nit primary color volume, but that is not the
+         * same thing as the content's mastering volume. Without this metadata
+         * KWin assumes every calibration patch may contain 10,000-nit content
+         * and tone-maps the whole signal before the output ICC transform. */
+        if (wayland_color.mastering_metadata) {
+            uint32_t mastering_min = (uint32_t)lround(
+                fmax(0.0, fmin(429496.0, mastering_min_luminance)) * 10000.0);
+            uint32_t mastering_max = (uint32_t)lround(
+                fmax(mastering_min_luminance + 0.0001,
+                     fmin(10000.0, mastering_max_luminance)));
+            uint32_t content_max = (uint32_t)lround(
+                fmax(1.0, fmin(10000.0, max_cll)));
+            uint32_t frame_average_max = (uint32_t)lround(
+                fmax(1.0, fmin((double)content_max, max_fall)));
+            wp_image_description_creator_params_v1_set_mastering_luminance(
+                creator, mastering_min, mastering_max);
+            wp_image_description_creator_params_v1_set_max_cll(
+                creator, content_max);
+            wp_image_description_creator_params_v1_set_max_fall(
+                creator, frame_average_max);
+        }
         description = wp_image_description_creator_params_v1_create(creator);
         if (!description) return SDL_SetError("Could not create HDR description");
         wayland_color.description_ready = false;
@@ -291,7 +323,9 @@ static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
         }
         wp_color_management_surface_v1_set_image_description(
             wayland_color.surface, description,
-            WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE);
+            wayland_color.absolute_no_adaptation_intent
+                ? WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE_NO_ADAPTATION
+                : WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE);
         wp_image_description_v1_destroy(description);
         wl_display_flush(wayland_color.display);
     }
@@ -303,7 +337,7 @@ static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
  * getaddrinfo() for it resolves on both Windows 10+ and Linux with
  * nss-mdns/avahi installed. */
 #define PGEN_DISCOVERY_HOST "pgenerator.local"
-/* PGenICCCompanion.template.conf ships inside the installer with these
+/* PGenPatchCompanion.template.conf ships inside the installer with these
  * literal slot markers in place of a real SERVER/TOKEN; PGenerator+
  * overwrites the fixed-width slots only when a unit downloads its own
  * personalised copy. A static installer taken straight from a GitHub release
@@ -311,6 +345,12 @@ static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
  * personalised and must be treated the same as the field being absent. */
 #define PGEN_SERVER_SLOT_MARKER "__PGEN_SERVER_SLOT__"
 #define PGEN_TOKEN_SLOT_MARKER "__PGEN_TOKEN_SLOT__"
+/* The conf holds the pairing token, and it was named for the Companion when
+ * the Companion was still called the ICC Companion. Both names are read so an
+ * install predating the rename keeps its pairing; only the current name is
+ * ever written, so the retired file stops mattering after the next save. */
+#define PGEN_CONF_NAME "PGenPatchCompanion.conf"
+#define PGEN_CONF_RETIRED_NAME "PGenICCCompanion.conf"
 
 typedef struct {
     char server[256];
@@ -403,6 +443,9 @@ typedef struct {
      * the last poll. The correction stages read the file from here, the way the
      * Windows build reads the path DXGI hands it. */
     char linux_profile_path[1024];
+    char linux_profile_connector[64];
+    bool linux_profile_hdr;
+    bool linux_forced_profile_passthrough;
 #endif
     double source_r, source_g, source_b;
     double submitted_r, submitted_g, submitted_b;
@@ -1011,11 +1054,11 @@ static bool token_is_valid(const char *token)
     return true;
 }
 
-/* Reads one PGenICCCompanion.conf and fills in whichever of SERVER/TOKEN/
- * DISPLAY it defines. Fields the file does not mention are left untouched, so
- * a caller can read the beside-the-binary copy and the pref-path copy into
- * separate buffers and merge them itself. Returns false only when the file
- * could not be opened. */
+/* Reads one conf file and fills in whichever of SERVER/TOKEN/DISPLAY it
+ * defines. Fields the file does not mention are left untouched, so a caller
+ * can read the beside-the-binary copy and the pref-path copy into separate
+ * buffers and merge them itself. Returns false only when the file could not be
+ * opened. */
 static bool load_conf_fields(const char *path, char *server, size_t server_size,
                              char *token, size_t token_size,
                              char *display, size_t display_size)
@@ -1040,9 +1083,34 @@ static bool load_conf_fields(const char *path, char *server, size_t server_size,
     return true;
 }
 
+/* Reads both conf names out of one directory, retired name first and current
+ * name over the top, so a field the current file actually defines wins while
+ * anything it leaves out still comes through from before the rename. Each
+ * file's slot markers are cleared before it is overlaid: an installer drops an
+ * unpersonalised template under the current name, and stripping only after the
+ * merge would let that empty template blank a real token underneath it. */
+static void load_conf_dir(const char *dir, char *server, size_t server_size,
+                          char *token, size_t token_size,
+                          char *display, size_t display_size)
+{
+    static const char *const names[] = { PGEN_CONF_RETIRED_NAME, PGEN_CONF_NAME };
+    for (size_t index = 0; index < SDL_arraysize(names); index++) {
+        char path[1024];
+        char file_server[256] = "", file_token[96] = "", file_display[192] = "";
+        SDL_snprintf(path, sizeof(path), "%s%s", dir, names[index]);
+        if (!load_conf_fields(path, file_server, sizeof(file_server),
+                              file_token, sizeof(file_token),
+                              file_display, sizeof(file_display))) continue;
+        if (strstr(file_server, PGEN_SERVER_SLOT_MARKER)) file_server[0] = '\0';
+        if (strstr(file_token, PGEN_TOKEN_SLOT_MARKER)) file_token[0] = '\0';
+        if (file_server[0]) SDL_strlcpy(server, file_server, server_size);
+        if (file_token[0]) SDL_strlcpy(token, file_token, token_size);
+        if (file_display[0]) SDL_strlcpy(display, file_display, display_size);
+    }
+}
+
 static bool load_config(CompanionConfig *config, int argc, char *argv[])
 {
-    char base_path[1024], pref_path[1024];
     char conf_server[256] = "", conf_token[96] = "", conf_display[192] = "";
     char pref_server[256] = "", pref_token[96] = "", pref_display[192] = "";
     const char *arg_server = NULL, *arg_token = NULL, *arg_display = NULL;
@@ -1059,22 +1127,15 @@ static bool load_config(CompanionConfig *config, int argc, char *argv[])
     }
 
     base = SDL_GetBasePath();
-    SDL_snprintf(base_path, sizeof(base_path), "%sPGenICCCompanion.conf", base ? base : "");
-    load_conf_fields(base_path, conf_server, sizeof(conf_server),
-                     conf_token, sizeof(conf_token), conf_display, sizeof(conf_display));
+    load_conf_dir(base ? base : "", conf_server, sizeof(conf_server),
+                  conf_token, sizeof(conf_token), conf_display, sizeof(conf_display));
     /* Learned at run time via companion_pair() and save_config() when the
      * beside-the-binary location is not writable, e.g. under Program Files. */
     pref = SDL_GetPrefPath("PGeneratorPlus", "PatchCompanion");
     if (pref) {
-        SDL_snprintf(pref_path, sizeof(pref_path), "%sPGenICCCompanion.conf", pref);
-        load_conf_fields(pref_path, pref_server, sizeof(pref_server),
-                         pref_token, sizeof(pref_token), pref_display, sizeof(pref_display));
+        load_conf_dir(pref, pref_server, sizeof(pref_server),
+                      pref_token, sizeof(pref_token), pref_display, sizeof(pref_display));
     }
-
-    if (strstr(conf_server, PGEN_SERVER_SLOT_MARKER)) conf_server[0] = '\0';
-    if (strstr(conf_token, PGEN_TOKEN_SLOT_MARKER)) conf_token[0] = '\0';
-    if (strstr(pref_server, PGEN_SERVER_SLOT_MARKER)) pref_server[0] = '\0';
-    if (strstr(pref_token, PGEN_TOKEN_SLOT_MARKER)) pref_token[0] = '\0';
 
     server_value = conf_server[0] ? conf_server : (pref_server[0] ? pref_server : NULL);
     token_value = conf_token[0] ? conf_token : (pref_token[0] ? pref_token : NULL);
@@ -1154,13 +1215,13 @@ static bool save_config(const CompanionConfig *config)
     FILE *file = NULL;
 
     if (base) {
-        SDL_snprintf(path, sizeof(path), "%sPGenICCCompanion.conf", base);
+        SDL_snprintf(path, sizeof(path), "%s" PGEN_CONF_NAME, base);
         file = fopen(path, "wb");
     }
     if (!file) {
         pref = SDL_GetPrefPath("PGeneratorPlus", "PatchCompanion");
         if (pref) {
-            SDL_snprintf(path, sizeof(path), "%sPGenICCCompanion.conf", pref);
+            SDL_snprintf(path, sizeof(path), "%s" PGEN_CONF_NAME, pref);
             file = fopen(path, "wb");
         }
     }
@@ -1872,7 +1933,6 @@ static bool apply_local_mhc2(const double input[3], double output[3])
     return true;
 }
 
-
 static bool load_correction_lut(uint64_t revision)
 {
     FILE *file;
@@ -2571,6 +2631,87 @@ static bool kwin_output_state(SDL_DisplayID display, KWinOutputState *state)
     return state->found;
 }
 
+static bool kwin_safe_connector(const char *connector)
+{
+    const unsigned char *cursor = (const unsigned char *)connector;
+    if (!cursor || !*cursor) return false;
+    for (; *cursor; cursor++)
+        if (!isalnum(*cursor) && *cursor != '-' && *cursor != '_' && *cursor != '.')
+            return false;
+    return true;
+}
+
+/* Keep compositor-managed and application-managed correction mutually
+ * exclusive. KWin uses the MHC2 curves as the output calibration when that
+ * tag exists, and otherwise uses vcgt. Leaving KWin's ICC path active while
+ * the Companion also evaluates MHC2 or BToA therefore corrects greyscale
+ * twice and crushes the first PQ steps.
+ *
+ * The assigned profile path is retained. Only its active source changes, so
+ * the Companion can still read the selected profile while presenting through
+ * EDID, and system mode can restore KWin handling without another file pick.
+ */
+static bool kwin_set_profile_source(const KWinOutputState *output, bool system_mode)
+{
+    char argument[256];
+    const char *source;
+    pid_t child;
+    int status = 0;
+    if (!output || !kwin_safe_connector(output->connector)) return false;
+    if (output->hdr) {
+        if (!output->hdr_icc_path[0]) return system_mode;
+        source = system_mode ? "ICC" : "EDID";
+        SDL_snprintf(argument, sizeof(argument),
+                     "output.%s.hdrColorProfileSource.%s",
+                     output->connector, source);
+    } else {
+        if (!output->icc_path[0]) return system_mode;
+        source = system_mode ? "ICC" : "sRGB";
+        SDL_snprintf(argument, sizeof(argument),
+                     "output.%s.colorProfileSource.%s",
+                     output->connector, source);
+    }
+    child = fork();
+    if (child < 0) return false;
+    if (child == 0) {
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDOUT_FILENO);
+            dup2(null_fd, STDERR_FILENO);
+            close(null_fd);
+        }
+        execlp("kscreen-doctor", "kscreen-doctor", argument, (char *)NULL);
+        _exit(127);
+    }
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return false;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return false;
+    SDL_strlcpy(app.linux_profile_connector, output->connector,
+                sizeof(app.linux_profile_connector));
+    app.linux_profile_hdr = output->hdr;
+    app.linux_forced_profile_passthrough = !system_mode;
+    return true;
+}
+
+static void kwin_restore_profile_source(void)
+{
+    KWinOutputState output;
+    if (!app.linux_forced_profile_passthrough) return;
+    if (!kwin_output_state(app.selected_display_id, &output)) {
+        SDL_zero(output);
+        SDL_strlcpy(output.connector, app.linux_profile_connector,
+                    sizeof(output.connector));
+        output.hdr = app.linux_profile_hdr;
+        if (output.hdr)
+            SDL_strlcpy(output.hdr_icc_path, "assigned",
+                        sizeof(output.hdr_icc_path));
+        else
+            SDL_strlcpy(output.icc_path, "assigned", sizeof(output.icc_path));
+    }
+    (void)kwin_set_profile_source(&output, true);
+}
+
 static uint32_t kwin_hdr_surface_reference(SDL_DisplayID display)
 {
     KWinOutputState output;
@@ -2742,7 +2883,9 @@ static bool try_create_renderer(bool hdr, const char *driver)
      * Attach BT.2020/PQ before the first frame reaches KWin. */
     if (!pgen_wayland_set_hdr_surface(
             app.window, hdr,
-            hdr ? kwin_hdr_surface_reference(app.selected_display_id) : 0)) {
+            hdr ? kwin_hdr_surface_reference(app.selected_display_id) : 0,
+            app.command_min_luma, app.command_max_luma,
+            app.command_max_cll, app.command_max_fall)) {
         destroy_renderer();
         return false;
     }
@@ -3504,6 +3647,22 @@ static void poll_server(void)
 #ifdef _WIN32
             wcsncpy(app.correction_profile_path,active_profile_path,SDL_arraysize(app.correction_profile_path)-1);
             app.correction_profile_path[SDL_arraysize(app.correction_profile_path)-1]=L'\0';
+#else
+            {
+                KWinOutputState output;
+                bool system_mode = !strcmp(app.correction_mode, "system");
+                if (kwin_output_state(app.selected_display_id, &output) &&
+                    (output.hdr_icc_path[0] || output.icc_path[0]) &&
+                    !kwin_set_profile_source(&output, system_mode)) {
+                    app.correction_ready = false;
+                    SDL_strlcpy(app.correction_error,
+                                "Could not switch KWin to the selected profile correction path",
+                                sizeof(app.correction_error));
+                    app.correction_lut_revision = settings_revision;
+                    app.next_poll_ms = SDL_GetTicks() + 500;
+                    return;
+                }
+            }
 #endif
             load_correction_lut(settings_revision);
         }
@@ -3932,7 +4091,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                                  "Could not find a PGenerator+ on this network. PGenerator+ answers to "
                                  "the name " PGEN_DISCOVERY_HOST ". If this computer cannot resolve that "
                                  "name, put a line reading SERVER=http://<address of your PGenerator+> "
-                                 "in PGenICCCompanion.conf beside this program, or start it with "
+                                 "in " PGEN_CONF_NAME " beside this program, or start it with "
                                  "--server=http://<address>.", NULL);
         return SDL_APP_FAILURE;
     }
@@ -4102,6 +4261,9 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
     if (state) {
         SDL_SetAtomicInt(&state->quit_requested, 1);
         if (state->network_thread) SDL_WaitThread(state->network_thread, NULL);
+#ifndef _WIN32
+        kwin_restore_profile_source();
+#endif
         if (state->texture) SDL_DestroyTexture(state->texture);
         if (state->background_texture) SDL_DestroyTexture(state->background_texture);
         if (state->renderer) SDL_DestroyRenderer(state->renderer);
@@ -4109,9 +4271,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
         windows_destroy_hdr_output();
 #endif
         SDL_free(state->correction_lut);
-#ifdef _WIN32
         SDL_free(state->correction_profile_data);
-#endif
         if (state->window) SDL_DestroyWindow(state->window);
         if (state->network_mutex) SDL_DestroyMutex(state->network_mutex);
     }
