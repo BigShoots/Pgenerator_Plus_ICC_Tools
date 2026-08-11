@@ -16,15 +16,18 @@ Download current builds from the [latest release](../../releases/latest).
 | `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows 10/11 x64 | Installer for Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, Start Menu entries, and the uninstaller |
 | `PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip` | Windows 10/11 x64 | Portable versions of the same programs |
 | `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux with glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, bundled SDL3, and the KDE HDR tone-mapping reset helper |
+| `pgen-icc-tools-bin-1.4.11-1-x86_64.pkg.tar.zst` | Arch Linux x86-64 | Native package of the Linux tools, installed under `/opt/pgen-icc-tools` with commands linked into `/usr/bin` |
 
 The Windows builds are not code-signed, so Windows may show a SmartScreen
 warning.
 
 ## Current release
 
-Version 1.4.10 is paired with the pgen22 KWin build. The Patch Companion in
+Version 1.4.11 is paired with the pgen22 KWin build. The Patch Companion in
 this release:
 
+- accepts **Install & Apply** requests from the PGenerator+ profile history
+  and hands the profile to Profile Loader for the display showing patches;
 - uses the ICC `chad` matrix for the absolute-colorimetric input to an HDR B2A
   table when the profile has no VCGT;
 - evaluates `mft2` cLUTs with the same tetrahedral interpolation used by
@@ -34,8 +37,25 @@ this release:
 - waits for a successful profile upload response before reporting a remote
   build as complete.
 
-The Linux archive also contains `reset-hdr-tonemapping.sh`. The release
-`SHA256SUMS` file covers all three downloads.
+The Linux archive and Arch package also contain `reset-hdr-tonemapping.sh`.
+The release `SHA256SUMS` file covers all downloads.
+
+### Installing a completed profile from the WebUI
+
+Keep Patch Companion open on the display being profiled. Completed builds and
+saved entries in Profile History then show a green **Install & Apply** button
+beside **Download**.
+
+On Windows, Patch Companion opens Profile Loader with the new ICC and the
+exact monitor identity. Profile Loader performs the Windows install and HDR or
+SDR association, saves that monitor/profile pairing, verifies the active
+default, and keeps its normal automatic reapply behavior. This also works when
+Profile Loader was not already running.
+
+On Linux, the same action opens Profile Loader for the selected monitor. The
+profile is copied into the user's ICC directory and applied through KWin on
+Plasma, or through colord on supported non-KDE sessions. The WebUI does not
+offer this action when Patch Companion is disconnected.
 
 ### VCGT and no-VCGT profiles
 

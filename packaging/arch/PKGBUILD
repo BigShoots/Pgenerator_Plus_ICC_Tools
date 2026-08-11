@@ -1,0 +1,27 @@
+pkgname=pgen-icc-tools-bin
+pkgver=1.4.11
+pkgrel=1
+pkgdesc='PGenerator+ Patch Companion and display profile loader'
+arch=('x86_64')
+url='https://github.com/BigShoots/Pgenerator_Plus_ICC_Tools'
+license=('GPL-3.0-or-later')
+depends=('glibc' 'wayland')
+optdepends=('kscreen: apply profiles to KDE Plasma displays'
+            'colord: apply profiles on supported non-KDE desktops')
+provides=('pgen-icc-tools')
+conflicts=('pgen-icc-tools')
+source=("PGeneratorPlus-ICC-Tools-Linux-x64.zip::${url}/releases/download/v${pkgver}/PGeneratorPlus-ICC-Tools-Linux-x64.zip")
+sha256sums=('ac0f40da58ef646173bb6814a08115bf25c4c4b0fda55c447e79b904b4b0783d')
+
+package() {
+  install -d "$pkgdir/opt/pgen-icc-tools" "$pkgdir/usr/bin"
+  install -m755 PGenPatchCompanion PGenProfileLoader reset-hdr-tonemapping.sh \
+    colprof profcheck "$pkgdir/opt/pgen-icc-tools/"
+  install -m755 libSDL3.so.0 "$pkgdir/opt/pgen-icc-tools/libSDL3.so.0"
+  install -m644 README.txt SDL3-LICENSE.txt DejaVu-LICENSE.txt \
+    ArgyllCMS-LICENSE.txt "$pkgdir/opt/pgen-icc-tools/"
+  ln -s /opt/pgen-icc-tools/PGenPatchCompanion "$pkgdir/usr/bin/PGenPatchCompanion"
+  ln -s /opt/pgen-icc-tools/PGenProfileLoader "$pkgdir/usr/bin/PGenProfileLoader"
+  ln -s /opt/pgen-icc-tools/reset-hdr-tonemapping.sh \
+    "$pkgdir/usr/bin/reset-hdr-tonemapping"
+}
