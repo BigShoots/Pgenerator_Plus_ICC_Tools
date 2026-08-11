@@ -46,16 +46,18 @@ Keep Patch Companion open on the display being profiled. Completed builds and
 saved entries in Profile History then show a green **Install & Apply** button
 beside **Download**.
 
-On Windows, Patch Companion opens Profile Loader with the new ICC and the
-exact monitor identity. Profile Loader performs the Windows install and HDR or
-SDR association, saves that monitor/profile pairing, verifies the active
-default, and keeps its normal automatic reapply behavior. This also works when
-Profile Loader was not already running.
+On Windows, Patch Companion hands Profile Loader the new ICC and the exact
+monitor identity. Profile Loader performs the Windows install and HDR or SDR
+association, saves that monitor/profile pairing, verifies the active default,
+and keeps its normal automatic reapply behavior from the tray. This also works
+when Profile Loader was not already running, without forcing its window open.
 
-On Linux, the same action opens Profile Loader for the selected monitor. The
-profile is copied into the user's ICC directory and applied through KWin on
-Plasma, or through colord on supported non-KDE sessions. The WebUI does not
-offer this action when Patch Companion is disconnected.
+On Linux, the same action runs Profile Loader silently for the selected
+monitor. The profile is copied into the user's ICC directory and applied
+through KWin on Plasma, or through colord on supported non-KDE sessions. The
+one-shot Loader exits after applying it, and Companion verifies the selected
+profile before reporting success. The WebUI does not offer this action when
+Patch Companion is disconnected.
 
 ### VCGT and no-VCGT profiles
 
