@@ -23,9 +23,11 @@ warning.
 
 ## Current release
 
-Version 1.4.13 is paired with the pgen23 KWin build. The Patch Companion in
+Version 1.4.14 is paired with the pgen23 KWin build. The Patch Companion in
 this release:
 
+- always loads the patched SDL bundled with the Linux tools, preventing stock
+  distro SDL builds from rejecting native HDR10 Vulkan output;
 - enables Windows' per-user display profile list when installing a profile,
   matching the "Use my settings for this device" option in Color Management;
 - accepts **Install & Apply** requests from the PGenerator+ profile history
@@ -154,7 +156,8 @@ current SDR reference brightness.
 Common/     Shared Patch Companion source, generated icon header, generator,
             Wayland protocol files, and configuration template
 Windows/    Windows Profile Loader source, resources, manifests, and installer
-Linux/      Linux Profile Loader source, generated font header, and generator
+Linux/      Linux launcher and Profile Loader source, generated font header,
+            and generator
 licenses/   Third-party licences included with distributed builds
 favicon.ico Shared application artwork
 ```
@@ -223,11 +226,15 @@ Run from the repository root:
 ```sh
 gcc -O2 -std=gnu11 -Wall -Wextra -ILinux $(pkg-config --cflags sdl3 wayland-client) \
     Common/pgen-icc-companion.c Common/pgen-color-management-v1-protocol.c \
-    -o PGenPatchCompanion $(pkg-config --libs sdl3 wayland-client) -lm
+    -o PGenPatchCompanion.bin $(pkg-config --libs sdl3 wayland-client) -lm \
+    -Wl,-rpath,'$ORIGIN'
 ```
 
 `Common/pgen-color-management-v1-protocol.c` provides the generated Wayland
 colour-management protocol glue and must be included in the link.
+Distribute `Linux/PGenPatchCompanion.sh` as `PGenPatchCompanion` beside the
+binary and bundled `libSDL3.so.0`. The launcher selects the bundled library;
+the binary's `$ORIGIN` runpath provides the same protection for direct launches.
 
 ### Profile Loader
 
