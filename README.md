@@ -23,7 +23,7 @@ warning.
 
 ## Current release
 
-Version 1.4.12 is paired with the pgen22 KWin build. The Patch Companion in
+Version 1.4.13 is paired with the pgen23 KWin build. The Patch Companion in
 this release:
 
 - enables Windows' per-user display profile list when installing a profile,
@@ -61,20 +61,22 @@ one-shot Loader exits after applying it, and Companion verifies the selected
 profile before reporting success. The WebUI does not offer this action when
 Patch Companion is disconnected.
 
-### VCGT and no-VCGT profiles
+### Calibration choices
 
-Both profile types are supported, but they are not interchangeable.
+PGenerator+ offers three calibration modes, and they are not interchangeable.
 
-- With no VCGT, the B2A table describes the uncalibrated display. Patch
-  Companion preserves the source's absolute HDR colorimetry and uses the
-  profile's chromatic adaptation matrix to enter the relative PCS domain.
-- With VCGT, neutral calibration is applied in source-PQ coordinates and the
-  B2A table is evaluated in the calibrated device domain. Measurements used to
-  build B2A must already account for that calibration.
+- **Calibration with VCGT** stores separate curves in the VCGT tag. Patched
+  KWin applies HDR neutral calibration in source-PQ coordinates.
+- **Calibration without VCGT** includes the curves in the ICC transforms. KDE
+  HDR cLUT profiles store them in high-resolution B2A output shapers so a
+  sharp OLED rolloff is not approximated by the 3D grid.
+- **No calibration** characterizes the display as measured and is intended for
+  a TV or monitor already calibrated internally.
 
 Removing VCGT from a calibrated-domain profile does not turn it into a valid
-no-VCGT profile. Adding VCGT to an uncalibrated profile is wrong for the same
-reason. Build the profile for the path that will be active during normal use.
+profile with included calibration. Adding VCGT to an uncalibrated profile is
+wrong for the same reason. Build the profile for the path that will be active
+during normal use.
 
 ### Release naming
 

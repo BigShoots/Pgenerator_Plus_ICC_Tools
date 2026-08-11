@@ -1,5 +1,5 @@
 pkgname=pgen-icc-tools-bin
-pkgver=1.4.12
+pkgver=1.4.13
 pkgrel=1
 pkgdesc='PGenerator+ Patch Companion and display profile loader'
 arch=('x86_64')
