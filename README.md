@@ -20,6 +20,38 @@ Download current builds from the [latest release](../../releases/latest).
 The Windows builds are not code-signed, so Windows may show a SmartScreen
 warning.
 
+## Current release
+
+Version 1.4.10 is paired with the pgen22 KWin build. The Patch Companion in
+this release:
+
+- uses the ICC `chad` matrix for the absolute-colorimetric input to an HDR B2A
+  table when the profile has no VCGT;
+- evaluates `mft2` cLUTs with the same tetrahedral interpolation used by
+  ArgyllCMS;
+- treats KDE's SDR reference as cd/m2 and does not multiply it by desktop
+  scale; and
+- waits for a successful profile upload response before reporting a remote
+  build as complete.
+
+The Linux archive also contains `reset-hdr-tonemapping.sh`. The release
+`SHA256SUMS` file covers all three downloads.
+
+### VCGT and no-VCGT profiles
+
+Both profile types are supported, but they are not interchangeable.
+
+- With no VCGT, the B2A table describes the uncalibrated display. Patch
+  Companion preserves the source's absolute HDR colorimetry and uses the
+  profile's chromatic adaptation matrix to enter the relative PCS domain.
+- With VCGT, neutral calibration is applied in source-PQ coordinates and the
+  B2A table is evaluated in the calibrated device domain. Measurements used to
+  build B2A must already account for that calibration.
+
+Removing VCGT from a calibrated-domain profile does not turn it into a valid
+no-VCGT profile. Adding VCGT to an uncalibrated profile is wrong for the same
+reason. Build the profile for the path that will be active during normal use.
+
 ### Release naming
 
 The PGenerator+ WebUI relies on the following names:
@@ -70,6 +102,10 @@ peak, maximum-average and minimum-luminance overrides to the values advertised
 by each monitor. It also restores KDE's display-derived SDR reference default
 and cycles HDR so KWin rebuilds the live output pipeline. The selected ICC
 path and HDR profile source are deliberately left untouched.
+
+Run it from the Plasma Wayland desktop as the logged-in user, not with `sudo`.
+Close the HDR brightness calibrator first. The reset briefly turns HDR off and
+back on for each selected output, so do not run it during a measurement series.
 
 Preview the detected monitors and changes first:
 
