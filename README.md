@@ -23,9 +23,11 @@ warning.
 
 ## Current release
 
-Version 1.4.11 is paired with the pgen22 KWin build. The Patch Companion in
+Version 1.4.12 is paired with the pgen22 KWin build. The Patch Companion in
 this release:
 
+- enables Windows' per-user display profile list when installing a profile,
+  matching the "Use my settings for this device" option in Color Management;
 - accepts **Install & Apply** requests from the PGenerator+ profile history
   and hands the profile to Profile Loader for the display showing patches;
 - uses the ICC `chad` matrix for the absolute-colorimetric input to an HDR B2A
@@ -169,7 +171,7 @@ The following generated headers are committed to the repository:
 | File | Generator | Used by |
 | --- | --- | --- |
 | `Common/pgen-icc-companion-icon.h` | `Common/make-icon-header.py`, using `favicon.ico` | Linux Patch Companion and Linux Profile Loader |
-| `Linux/pgen-ui-font.h` | `Linux/make-font-header.py`, using DejaVu fonts | Linux Profile Loader |
+| `Linux/pgen-ui-font.h` | `Linux/make-font-header.py`, using DejaVu fonts | Patch Companion and Linux Profile Loader |
 
 Pillow and the DejaVu font files are needed only when regenerating these
 headers. Keep `favicon.ico` at the repository root because the generators and
@@ -217,7 +219,7 @@ PQ patches on Plasma. The Linux release therefore includes `libSDL3.so.0`.
 Run from the repository root:
 
 ```sh
-gcc -O2 -std=gnu11 -Wall -Wextra $(pkg-config --cflags sdl3 wayland-client) \
+gcc -O2 -std=gnu11 -Wall -Wextra -ILinux $(pkg-config --cflags sdl3 wayland-client) \
     Common/pgen-icc-companion.c Common/pgen-color-management-v1-protocol.c \
     -o PGenPatchCompanion $(pkg-config --libs sdl3 wayland-client) -lm
 ```
@@ -274,7 +276,7 @@ relative icon and manifest paths resolve correctly.
     -O coff -o ../companion_rc.o)
 
 x86_64-w64-mingw32-gcc -O2 -std=gnu11 -DUNICODE -D_UNICODE \
-    -DSDL_MAIN_CALLBACK_STANDARD -I"$SDL3/include" \
+    -DSDL_MAIN_CALLBACK_STANDARD -I"$SDL3/include" -ILinux \
     Common/pgen-icc-companion.c companion_rc.o \
     -o PGeneratorPlusPatchCompanion.exe -L"$SDL3/lib" \
     -municode -mwindows \
