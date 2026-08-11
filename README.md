@@ -16,7 +16,7 @@ Download current builds from the [latest release](../../releases/latest).
 | `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows 10/11 x64 | Installer for Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, Start Menu entries, and the uninstaller |
 | `PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip` | Windows 10/11 x64 | Portable versions of the same programs |
 | `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux with glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, bundled SDL3, and the KDE HDR tone-mapping reset helper |
-| `pgen-icc-tools-bin-1.4.11-1-x86_64.pkg.tar.zst` | Arch Linux x86-64 | Native package of the Linux tools, installed under `/opt/pgen-icc-tools` with commands linked into `/usr/bin` |
+| `PGeneratorPlus-ICC-Tools-ArchLinux-x86_64.pkg.tar.zst` | Arch Linux x86-64 | Native package of the Linux tools, installed under `/opt/pgen-icc-tools` with commands linked into `/usr/bin` |
 
 The Windows builds are not code-signed, so Windows may show a SmartScreen
 warning.
