@@ -76,7 +76,7 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#define APP_VERSION "1.4.8"
+#define APP_VERSION "1.4.10"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */
 #define PGEN_NEUTRAL_BLEND 0.06
@@ -1620,12 +1620,10 @@ static bool inverse_matrix3(const double m[3][3], double out[3][3])
     return true;
 }
 
-/* Bradford adaptation from the profile's media white onto the D50 PCS white.
- * ArgyllCMS adapts display profiles with this transform and bakes it into the
- * cLUT, leaving wtpt holding the unadapted native white and no chad tag to
- * read back. Scaling XYZ channel-wise from wtpt to the PCS white -- the old
- * shortcut -- lands neutral away from where the profile expects it and biases
- * the corrected white point. */
+/* Construct a Bradford adaptation from a source-space white onto D50 PCS.
+ * This is used by the calibrated profile paths below. Ordinary uncalibrated
+ * Argyll display profiles instead use their saved chad matrix for the
+ * absolute-colorimetric conversion. */
 static bool companion_adaptation(const double media_white[3], double out[3][3])
 {
     static const double bradford[3][3]={{0.8951,0.2664,-0.1614},{-0.7502,1.7135,0.0367},{0.0389,-0.0685,1.0296}};
@@ -1661,6 +1659,34 @@ static void companion_source_xyz(const double rgb[3], const char *signal_mode,
     for(int row=0;row<3;row++) intermediate[row]=source[row][0]*linear[0]+source[row][1]*linear[1]+source[row][2]*linear[2];
     for(int row=0;row<3;row++)
         xyz[row]=adaptation[row][0]*intermediate[0]+adaptation[row][1]*intermediate[1]+adaptation[row][2]*intermediate[2];
+}
+
+/* Feed an uncalibrated HDR display profile through its standard absolute
+ * colorimetric PCS conversion. ArgyllCMS's B2A table accepts media-relative
+ * D50 PCS values. In a v4 display profile wtpt is already D50; the profile's
+ * chad matrix converts measured absolute XYZ into that relative PCS domain.
+ * Applying chad here matches ArgyllCMS's absolute-colorimetric B2A lookup.
+ * A profile with VCGT uses the source-PQ neutral calibration path below. */
+static bool companion_absolute_hdr_xyz(const double rgb[3], double white_nits,
+                                       double xyz[3])
+{
+    static const double bt2020_xyz[3][3]={{0.6369580,0.1446169,0.1688810},{0.2627002,0.6779981,0.0593017},{0.0,0.0280727,1.0609851}};
+    IccTag chad=icc_tag(app.correction_profile_data,app.correction_profile_size,"chad");
+    double linear[3],absolute[3],matrix[3][3];
+    if(!chad.data||chad.size<44||memcmp(chad.data,"sf32",4))return false;
+    for(int channel=0;channel<3;channel++){
+        linear[channel]=fmin(1.0,pq_to_nits(rgb[channel])/fmax(white_nits,1e-6));
+    }
+    for(int row=0;row<3;row++)
+        for(int column=0;column<3;column++){
+            matrix[row][column]=read_s15(chad.data+8+(row*3+column)*4);
+            if(!isfinite(matrix[row][column]))return false;
+        }
+    for(int row=0;row<3;row++)
+        absolute[row]=bt2020_xyz[row][0]*linear[0]+bt2020_xyz[row][1]*linear[1]+bt2020_xyz[row][2]*linear[2];
+    for(int row=0;row<3;row++)
+        xyz[row]=matrix[row][0]*absolute[0]+matrix[row][1]*absolute[1]+matrix[row][2]*absolute[2];
+    return true;
 }
 
 /* Absolute luminance of the profile's PCS white. The measurement set is
@@ -1729,12 +1755,28 @@ static bool apply_local_clut(const double xyz[3], double output[3])
         values[row]=icc_table_sample(tag.data+input_offset+(size_t)row*in_count*2,in_count,mapped/(65535.0/32768.0));
         double position=fmax(0.0,fmin(1.0,values[row]))*(grid-1); base[row]=(int)position; if(base[row]>=grid-1)base[row]=grid-2; fraction[row]=position-base[row];
     }
-    double clut_result[3]={0,0,0};
-    for(int corner=0;corner<8;corner++) {
-        double weight=1.0; int coordinate[3];
-        for(int axis=0;axis<3;axis++){bool upper=(corner&(1<<axis))!=0;coordinate[axis]=base[axis]+(upper?1:0);weight*=upper?fraction[axis]:1.0-fraction[axis];}
-        size_t offset=clut_offset+(size_t)(((coordinate[0]*grid+coordinate[1])*grid+coordinate[2])*3)*2;
-        for(int channel=0;channel<3;channel++) clut_result[channel]+=weight*read_be16(tag.data+offset+channel*2)/65535.0;
+    double clut_result[3];
+    for(int channel=0;channel<3;channel++) {
+#define CLUT_VALUE(dx,dy,dz) (read_be16(tag.data+clut_offset+(size_t)((((base[0]+(dx))*grid+(base[1]+(dy)))*grid+(base[2]+(dz)))*3+channel)*2)/65535.0)
+        double c000=CLUT_VALUE(0,0,0),c001=CLUT_VALUE(0,0,1);
+        double c010=CLUT_VALUE(0,1,0),c011=CLUT_VALUE(0,1,1);
+        double c100=CLUT_VALUE(1,0,0),c101=CLUT_VALUE(1,0,1);
+        double c110=CLUT_VALUE(1,1,0),c111=CLUT_VALUE(1,1,1);
+        double x=fraction[0],y=fraction[1],z=fraction[2];
+        /* ArgyllCMS uses tetrahedral interpolation for mft2 tables. Besides
+         * matching its profile validation, this matters greatly in the first
+         * HDR shadow cube where trilinear interpolation mixes all eight
+         * corners across a steep and chromatically uneven PQ response. */
+        if(x>=y) {
+            if(y>=z) clut_result[channel]=c000+x*(c100-c000)+y*(c110-c100)+z*(c111-c110);
+            else if(x>=z) clut_result[channel]=c000+x*(c100-c000)+z*(c101-c100)+y*(c111-c101);
+            else clut_result[channel]=c000+z*(c001-c000)+x*(c101-c001)+y*(c111-c101);
+        } else {
+            if(x>=z) clut_result[channel]=c000+y*(c010-c000)+x*(c110-c010)+z*(c111-c110);
+            else if(y>=z) clut_result[channel]=c000+y*(c010-c000)+z*(c011-c010)+x*(c111-c011);
+            else clut_result[channel]=c000+z*(c001-c000)+y*(c011-c001)+x*(c111-c011);
+        }
+#undef CLUT_VALUE
     }
     for(int channel=0;channel<3;channel++) output[channel]=icc_table_sample(tag.data+output_offset+(size_t)channel*out_count*2,out_count,clut_result[channel]);
     return true;
@@ -2032,7 +2074,16 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
         IccTag lumi=icc_tag(app.correction_profile_data,app.correction_profile_size,"lumi");
         if(!lumi.data||lumi.size<20||memcmp(lumi.data,"XYZ ",4)||(white_nits=read_s15(lumi.data+12))<=0.0)return false;
     }
-    companion_source_xyz(rgb,app.correction_signal_mode,white_nits,adaptation,xyz);
+    /* Without a calibration tag this is an ordinary ArgyllCMS display
+     * profile. Preserve source absolute colorimetry rather than adapting D65
+     * onto the display's native media white. */
+    if(!strcmp(app.correction_signal_mode,"hdr10")
+       && !icc_tag(app.correction_profile_data,app.correction_profile_size,"vcgt").data
+       && !icc_tag(app.correction_profile_data,app.correction_profile_size,"MHC2").data){
+        if(!companion_absolute_hdr_xyz(rgb,white_nits,xyz))return false;
+    }else{
+        companion_source_xyz(rgb,app.correction_signal_mode,white_nits,adaptation,xyz);
+    }
     if(!strcmp(app.correction_mode,"clut")){if(!apply_local_clut(xyz,output))return false;}
     else if(!apply_local_matrix(xyz,output))return false;
     /* A 3D cLUT cannot resolve the steep PQ shadow axis at its grid spacing.
@@ -2504,7 +2555,6 @@ typedef struct {
     bool enabled;
     bool hdr;
     int sdr_brightness;
-    double scale;
     char connector[64];
     long score;               /* Distance from the SDL rectangle */
     char icc_path[1024];      /* SDR slot */
@@ -2596,8 +2646,6 @@ static bool kwin_output_state(SDL_DisplayID display, KWinOutputState *state)
                  * different monitor never wins. */
                 pending.found = (dx <= 4 && dy <= 4 && dw <= 8 && dh <= 8);
             }
-        } else if (current && !strncmp(cursor, "Scale:", 6)) {
-            (void)sscanf(cursor + 6, " %lf", &pending.scale);
         } else if (current && !strncmp(cursor, "HDR ICC profile:", 16)) {
             SDL_strlcpy(pending.hdr_icc_path, cursor + 16, sizeof(pending.hdr_icc_path));
             kwin_trim(pending.hdr_icc_path);
@@ -2715,24 +2763,17 @@ static void kwin_restore_profile_source(void)
 static uint32_t kwin_hdr_surface_reference(SDL_DisplayID display)
 {
     KWinOutputState output;
-    double scale;
     double reference;
     if (!kwin_output_state(display, &output) || output.sdr_brightness <= 0)
         return 203;
-    scale = output.scale;
-    if (!isfinite(scale) || scale <= 0.0)
-        scale = SDL_GetDisplayContentScale(display);
-    if (!isfinite(scale) || scale <= 0.0) scale = 1.0;
-    /* Plasma currently applies the output's SDR-white anchor in logical
-     * surface units. Compensating by the output content scale keeps absolute
-     * PQ patches invariant when either the HDR brightness slider or display
-     * scaling changes. This was verified at both 230 and 417 nit settings on
-     * the same HDR output. */
-    reference = output.sdr_brightness * (double)scale;
+    /* The Wayland image description specifies reference luminance in cd/m2.
+     * Desktop scale changes logical geometry only and must never alter the
+     * absolute luminance represented by a PQ surface. */
+    reference = output.sdr_brightness;
     if (reference < 1.0) reference = 1.0;
     if (reference > 10000.0) reference = 10000.0;
-    SDL_Log("KWin HDR reference: SDR white %d, content scale %.3f, surface reference %.0f",
-            output.sdr_brightness, (double)scale, reference);
+    SDL_Log("KWin HDR reference: SDR white %d, surface reference %.0f",
+            output.sdr_brightness, reference);
     return (uint32_t)lround(reference);
 }
 #endif
@@ -3468,7 +3509,8 @@ static void companion_run_build(const char *poll_response)
                 size_t reply_length = 0;
                 SDL_snprintf(path, sizeof(path), "/api/icc/companion/build-result?token=%s", app.config.token);
                 if (http_binary(&app.config, "POST", path, "application/octet-stream",
-                                icc, (size_t)size, &reply, &reply_length) == 200)
+                                icc, (size_t)size, &reply, &reply_length) == 200 &&
+                    reply && strstr((const char *)reply, "\"status\":\"ok\""))
                     built = true;
                 if (reply) SDL_free(reply);
             }

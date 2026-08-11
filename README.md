@@ -15,7 +15,7 @@ Download current builds from the [latest release](../../releases/latest).
 | --- | --- | --- |
 | `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows 10/11 x64 | Installer for Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, Start Menu entries, and the uninstaller |
 | `PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip` | Windows 10/11 x64 | Portable versions of the same programs |
-| `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux with glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, and bundled SDL3 |
+| `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux with glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, bundled SDL3, and the KDE HDR tone-mapping reset helper |
 
 The Windows builds are not code-signed, so Windows may show a SmartScreen
 warning.
@@ -62,6 +62,29 @@ PGenPatchCompanion --server=http://192.0.2.10
 ```
 
 An explicitly configured server takes precedence over discovery.
+
+## KDE HDR tone-mapping reset
+
+The Linux archive includes `reset-hdr-tonemapping.sh`. It resets KWin's HDR
+peak, maximum-average and minimum-luminance overrides to the values advertised
+by each monitor. It also restores KDE's display-derived SDR reference default
+and cycles HDR so KWin rebuilds the live output pipeline. The selected ICC
+path and HDR profile source are deliberately left untouched.
+
+Preview the detected monitors and changes first:
+
+```sh
+./reset-hdr-tonemapping.sh --dry-run
+```
+
+Reset every connected, enabled HDR monitor:
+
+```sh
+./reset-hdr-tonemapping.sh
+```
+
+Use `--output DP-2` to select one connector or `--keep-sdr` to retain its
+current SDR reference brightness.
 
 ## Source layout
 
