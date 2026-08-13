@@ -81,8 +81,8 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#define APP_VERSION "1.4.15"
-#define APP_BUILD "3"
+#define APP_VERSION "1.4.16"
+#define APP_BUILD "1"
 #define APP_TITLE "PGenerator+ Patch Companion " APP_VERSION " (build " APP_BUILD ")"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */

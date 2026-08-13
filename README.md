@@ -23,9 +23,19 @@ warning.
 
 ## Current release
 
-Version 1.4.15 is paired with the pgen23 KWin build. The Patch Companion in
+Version 1.4.16 is paired with the pgen23 KWin build. The Patch Companion in
 this release:
 
+- keeps polling PGenerator+ while Windows installs a profile, preventing the
+  WebUI from reporting that Companion disconnected during a slow Windows
+  color-management call;
+- preserves the Companion server and pairing token when the Windows tools are
+  upgraded;
+- reports a successful Windows profile association as soon as the selected
+  per-user default is active, while Windows finishes any remaining work in
+  the background;
+- selects HDR correction mode from the active Windows HDR association rather
+  than an unrelated SDR profile;
 - always loads the patched SDL bundled with the Linux tools, preventing stock
   distro SDL builds from rejecting native HDR10 Vulkan output;
 - enables Windows' per-user display profile list when installing a profile,

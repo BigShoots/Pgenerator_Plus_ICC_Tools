@@ -16,10 +16,10 @@ BrandingText "PGenerator+"
 Icon "..\favicon.ico"
 UninstallIcon "..\favicon.ico"
 
-VIProductVersion "1.4.15.0"
+VIProductVersion "1.4.16.0"
 VIAddVersionKey "ProductName" "PGenerator+ ICC Tools"
 VIAddVersionKey "FileDescription" "PGenerator+ Patch Companion and Profile Loader installer"
-VIAddVersionKey "FileVersion" "1.4.15"
+VIAddVersionKey "FileVersion" "1.4.16"
 VIAddVersionKey "LegalCopyright" "GNU GPL"
 
 !define MUI_ABORTWARNING
@@ -63,7 +63,9 @@ Section "PGenerator+ Patch Companion and Profile Loader" SEC_CORE
   ; Stored without compression so the Pi can replace the fixed-width pairing
   ; slots before download. The resulting EXE remains a single installer.
   SetCompress off
+  SetOverwrite off
   File /oname=PGenPatchCompanion.conf "PGenPatchCompanion.template.conf"
+  SetOverwrite on
   SetCompress auto
 
   CreateDirectory "$SMPROGRAMS\PGenerator+"
@@ -80,7 +82,7 @@ Section "PGenerator+ Patch Companion and Profile Loader" SEC_CORE
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
               "DisplayName" "PGenerator+ ICC Tools"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
-              "DisplayVersion" "1.4.15"
+              "DisplayVersion" "1.4.16"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
               "Publisher" "PGenerator+"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
