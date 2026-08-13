@@ -23,7 +23,7 @@ warning.
 
 ## Current release
 
-Version 1.4.16 is paired with the pgen23 KWin build. The Patch Companion in
+Version 1.4.17 is paired with the pgen23 KWin build. The Patch Companion in
 this release:
 
 - keeps polling PGenerator+ while Windows installs a profile, preventing the
@@ -31,6 +31,7 @@ this release:
   color-management call;
 - preserves the Companion server and pairing token when the Windows tools are
   upgraded;
+- cleans up the silent Linux Profile Loader process after an install;
 - reports a successful Windows profile association as soon as the selected
   per-user default is active, while Windows finishes any remaining work in
   the background;
