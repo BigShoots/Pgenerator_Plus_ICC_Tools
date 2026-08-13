@@ -23,7 +23,7 @@ warning.
 
 ## Current release
 
-Version 1.4.14 is paired with the pgen23 KWin build. The Patch Companion in
+Version 1.4.15 is paired with the pgen23 KWin build. The Patch Companion in
 this release:
 
 - always loads the patched SDL bundled with the Linux tools, preventing stock
@@ -32,10 +32,12 @@ this release:
   matching the "Use my settings for this device" option in Color Management;
 - accepts **Install & Apply** requests from the PGenerator+ profile history
   and hands the profile to Profile Loader for the display showing patches;
-- uses the ICC `chad` matrix for the absolute-colorimetric input to an HDR B2A
-  table when the profile has no VCGT;
-- evaluates `mft2` cLUTs with the same tetrahedral interpolation used by
-  ArgyllCMS;
+- adapts HDR source colors from BT.2020 D65 to the D50 B2A connection space,
+  including profiles with no VCGT;
+- evaluates `mft2` cLUTs with the same trilinear 3D texture interpolation used
+  by KWin;
+- keeps every HDR swapchain image current for 15 seconds after a patch change,
+  then stops presenting while idle instead of continuously consuming GPU;
 - treats KDE's SDR reference as cd/m2 and does not multiply it by desktop
   scale; and
 - waits for a successful profile upload response before reporting a remote

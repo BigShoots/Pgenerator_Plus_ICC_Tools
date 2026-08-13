@@ -81,7 +81,7 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#define APP_VERSION "1.4.14"
+#define APP_VERSION "1.4.15"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */
 #define PGEN_NEUTRAL_BLEND 0.06
@@ -94,6 +94,7 @@ typedef struct {
     struct wp_color_manager_v1 *manager;
     struct wp_color_management_surface_v1 *surface;
     bool parametric;
+    bool set_primaries;
     bool luminances;
     bool mastering_metadata;
     bool pq;
@@ -102,6 +103,11 @@ typedef struct {
     bool absolute_no_adaptation_intent;
     bool description_ready;
     bool description_failed;
+    bool information_done;
+    bool native_primaries_ready;
+    int32_t native_primaries[8];
+    bool target_primaries_ready;
+    int32_t target_primaries[8];
 } PgenWaylandColor;
 
 static PgenWaylandColor wayland_color;
@@ -124,6 +130,8 @@ static void pgen_cm_feature(void *data, struct wp_color_manager_v1 *manager,
     (void)manager;
     if (feature == WP_COLOR_MANAGER_V1_FEATURE_PARAMETRIC)
         state->parametric = true;
+    else if (feature == WP_COLOR_MANAGER_V1_FEATURE_SET_PRIMARIES)
+        state->set_primaries = true;
     else if (feature == WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES)
         state->luminances = true;
     else if (feature == WP_COLOR_MANAGER_V1_FEATURE_SET_MASTERING_DISPLAY_PRIMARIES)
@@ -222,7 +230,62 @@ static const struct wp_image_description_v1_listener pgen_description_listener =
     pgen_description_failed, pgen_description_ready, pgen_description_ready2
 };
 
+static void pgen_preferred_changed(void *data,
+                                   struct wp_color_management_surface_feedback_v1 *feedback,
+                                   uint32_t identity)
+{ (void)data; (void)feedback; (void)identity; }
+static void pgen_preferred_changed2(void *data,
+                                    struct wp_color_management_surface_feedback_v1 *feedback,
+                                    uint32_t identity_hi, uint32_t identity_lo)
+{ (void)data; (void)feedback; (void)identity_hi; (void)identity_lo; }
+static const struct wp_color_management_surface_feedback_v1_listener pgen_feedback_listener={
+    pgen_preferred_changed, pgen_preferred_changed2
+};
+static void pgen_info_done(void *data, struct wp_image_description_info_v1 *info)
+{ ((PgenWaylandColor *)data)->information_done=true; (void)info; }
+static void pgen_info_icc(void *data, struct wp_image_description_info_v1 *info, int32_t fd, uint32_t size)
+{ (void)data; (void)info; (void)size; close(fd); }
+static void pgen_info_primaries(void *data, struct wp_image_description_info_v1 *info,
+                                int32_t rx, int32_t ry, int32_t gx, int32_t gy,
+                                int32_t bx, int32_t by, int32_t wx, int32_t wy)
+{
+    PgenWaylandColor *state=data;
+    int32_t values[8]={rx,ry,gx,gy,bx,by,wx,wy};
+    memcpy(state->native_primaries,values,sizeof(values));
+    state->native_primaries_ready=true; (void)info;
+}
+static void pgen_info_named_primaries(void *d, struct wp_image_description_info_v1 *i, uint32_t v)
+{ (void)d; (void)i; (void)v; }
+static void pgen_info_tf_power(void *d, struct wp_image_description_info_v1 *i, uint32_t v)
+{ (void)d; (void)i; (void)v; }
+static void pgen_info_tf_named(void *d, struct wp_image_description_info_v1 *i, uint32_t v)
+{ (void)d; (void)i; (void)v; }
+static void pgen_info_luminances(void *d, struct wp_image_description_info_v1 *i, uint32_t a, uint32_t b, uint32_t c)
+{ (void)d; (void)i; (void)a; (void)b; (void)c; }
+static void pgen_info_target_primaries(void *data, struct wp_image_description_info_v1 *info,
+                                       int32_t rx, int32_t ry, int32_t gx, int32_t gy,
+                                       int32_t bx, int32_t by, int32_t wx, int32_t wy)
+{
+    PgenWaylandColor *state=data;
+    int32_t values[8]={rx,ry,gx,gy,bx,by,wx,wy};
+    memcpy(state->target_primaries,values,sizeof(values));
+    state->target_primaries_ready=true; (void)info;
+}
+static void pgen_info_target_luminance(void *d, struct wp_image_description_info_v1 *i, uint32_t a, uint32_t b)
+{ (void)d; (void)i; (void)a; (void)b; }
+static void pgen_info_max_cll(void *d, struct wp_image_description_info_v1 *i, uint32_t v)
+{ (void)d; (void)i; (void)v; }
+static void pgen_info_max_fall(void *d, struct wp_image_description_info_v1 *i, uint32_t v)
+{ (void)d; (void)i; (void)v; }
+static const struct wp_image_description_info_v1_listener pgen_info_listener={
+    pgen_info_done,pgen_info_icc,pgen_info_primaries,pgen_info_named_primaries,
+    pgen_info_tf_power,pgen_info_tf_named,pgen_info_luminances,
+    pgen_info_target_primaries,pgen_info_target_luminance,pgen_info_max_cll,
+    pgen_info_max_fall
+};
+
 static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
+                                         bool device_encoded,
                                          uint32_t reference_luminance,
                                          double mastering_min_luminance,
                                          double mastering_max_luminance,
@@ -277,6 +340,55 @@ static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
         (!wayland_color.absolute_intent &&
          !wayland_color.absolute_no_adaptation_intent)) {
         return SDL_SetError("KWin lacks native BT.2020/PQ surface support");
+    }
+
+    /* Locally evaluated B2A values are encoded in the display's device gamut,
+     * not BT.2020. Reuse KWin's reported target primaries with PQ transfer so
+     * the compositor does not interpret them as BT.2020 a second time. */
+    if (device_encoded) {
+        struct wp_color_management_surface_feedback_v1 *feedback=
+            wp_color_manager_v1_get_surface_feedback(wayland_color.manager,wl_surface);
+        struct wp_image_description_v1 *preferred,*description;
+        struct wp_image_description_info_v1 *information;
+        struct wp_image_description_creator_params_v1 *creator;
+        if(!feedback)return SDL_SetError("Could not query the output color description");
+        wp_color_management_surface_feedback_v1_add_listener(feedback,&pgen_feedback_listener,&wayland_color);
+        preferred=wp_color_management_surface_feedback_v1_get_preferred(feedback);
+        if(!preferred){wp_color_management_surface_feedback_v1_destroy(feedback);return SDL_SetError("Could not create the output color description");}
+        wayland_color.description_ready=false;
+        wayland_color.description_failed=false;
+        wp_image_description_v1_add_listener(preferred,&pgen_description_listener,&wayland_color);
+        if(wl_display_roundtrip(wayland_color.display)<0||wayland_color.description_failed||!wayland_color.description_ready){
+            wp_image_description_v1_destroy(preferred);wp_color_management_surface_feedback_v1_destroy(feedback);return SDL_SetError("KWin rejected the output color description");
+        }
+        wayland_color.information_done=false;wayland_color.native_primaries_ready=false;wayland_color.target_primaries_ready=false;
+        information=wp_image_description_v1_get_information(preferred);
+        wp_image_description_info_v1_add_listener(information,&pgen_info_listener,&wayland_color);
+        if(wl_display_roundtrip(wayland_color.display)<0||!wayland_color.information_done||!wayland_color.native_primaries_ready||!wayland_color.set_primaries){
+            wp_image_description_v1_destroy(preferred);wp_color_management_surface_feedback_v1_destroy(feedback);return SDL_SetError("KWin did not provide native output primaries");
+        }
+        creator=wp_color_manager_v1_create_parametric_creator(wayland_color.manager);
+        wp_image_description_creator_params_v1_set_tf_named(creator,WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
+        {
+            const int32_t *p=wayland_color.target_primaries_ready?wayland_color.target_primaries:wayland_color.native_primaries;
+            wp_image_description_creator_params_v1_set_primaries(creator,p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
+        }
+        wp_image_description_creator_params_v1_set_luminances(creator,0,10000,reference_luminance?reference_luminance:203);
+        description=wp_image_description_creator_params_v1_create(creator);
+        wayland_color.description_ready=false;wayland_color.description_failed=false;
+        wp_image_description_v1_add_listener(description,&pgen_description_listener,&wayland_color);
+        if(wl_display_roundtrip(wayland_color.display)<0||wayland_color.description_failed||!wayland_color.description_ready){
+            wp_image_description_v1_destroy(description);wp_image_description_v1_destroy(preferred);wp_color_management_surface_feedback_v1_destroy(feedback);return SDL_SetError("KWin rejected native-primary PQ output");
+        }
+        wp_color_management_surface_v1_set_image_description(wayland_color.surface,description,
+            wayland_color.absolute_no_adaptation_intent
+                ? WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE_NO_ADAPTATION
+                : WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE);
+        wp_image_description_v1_destroy(description);
+        wp_image_description_v1_destroy(preferred);
+        wp_color_management_surface_feedback_v1_destroy(feedback);
+        wl_display_flush(wayland_color.display);
+        return true;
     }
 
     {
@@ -396,6 +508,7 @@ typedef struct {
     SDL_Mutex *network_mutex;
     SDL_AtomicInt quit_requested;
     bool command_pending;
+    uint64_t refresh_until_ms;
     uint64_t command_sequence;
     bool command_alignment;
     double command_r, command_g, command_b;
@@ -1676,69 +1789,6 @@ static void companion_source_xyz(const double rgb[3], const char *signal_mode,
         xyz[row]=adaptation[row][0]*intermediate[0]+adaptation[row][1]*intermediate[1]+adaptation[row][2]*intermediate[2];
 }
 
-/* Feed an uncalibrated HDR display profile through its standard absolute
- * colorimetric PCS conversion. ArgyllCMS's B2A table accepts media-relative
- * D50 PCS values. In a v4 display profile wtpt is already D50; the profile's
- * chad matrix converts measured absolute XYZ into that relative PCS domain.
- * Applying chad here matches ArgyllCMS's absolute-colorimetric B2A lookup.
- * A profile with VCGT uses the source-PQ neutral calibration path below. */
-static bool companion_absolute_hdr_xyz(const double rgb[3], double white_nits,
-                                       double xyz[3])
-{
-    static const double bt2020_xyz[3][3]={{0.6369580,0.1446169,0.1688810},{0.2627002,0.6779981,0.0593017},{0.0,0.0280727,1.0609851}};
-    IccTag chad=icc_tag(app.correction_profile_data,app.correction_profile_size,"chad");
-    double linear[3],absolute[3],matrix[3][3];
-    if(!chad.data||chad.size<44||memcmp(chad.data,"sf32",4))return false;
-    for(int channel=0;channel<3;channel++){
-        linear[channel]=fmin(1.0,pq_to_nits(rgb[channel])/fmax(white_nits,1e-6));
-    }
-    for(int row=0;row<3;row++)
-        for(int column=0;column<3;column++){
-            matrix[row][column]=read_s15(chad.data+8+(row*3+column)*4);
-            if(!isfinite(matrix[row][column]))return false;
-        }
-    for(int row=0;row<3;row++)
-        absolute[row]=bt2020_xyz[row][0]*linear[0]+bt2020_xyz[row][1]*linear[1]+bt2020_xyz[row][2]*linear[2];
-    for(int row=0;row<3;row++)
-        xyz[row]=matrix[row][0]*absolute[0]+matrix[row][1]*absolute[1]+matrix[row][2]*absolute[2];
-    return true;
-}
-
-/* Absolute luminance of the profile's PCS white. The measurement set is
- * normalised so PCS Y=1.0 is the profiling white, and ArgyllCMS embeds that
- * value as LUMINANCE_XYZ_CDM2 in the retained characterization tags. The lumi
- * tag is not interchangeable: for Windows HDR profiles the builder writes the
- * MHC2-calibrated peak there, which is lower by the white-balance headroom the
- * matrix takes, so normalising PQ by it over-drives every level. */
-static bool companion_characterization_white(double *white_nits)
-{
-    static const char *names[3]={"targ","CIED","DevD"};
-    for(int index=0;index<3;index++) {
-        IccTag tag=icc_tag(app.correction_profile_data,app.correction_profile_size,names[index]);
-        if(!tag.data||tag.size<16||memcmp(tag.data,"text",4)) continue;
-        for(size_t offset=8;offset+18<tag.size;offset++) {
-            if(memcmp(tag.data+offset,"LUMINANCE_XYZ_CDM2",18)) continue;
-            const char *cursor=(const char *)tag.data+offset+18;
-            const char *limit=(const char *)tag.data+tag.size;
-            char buffer[128];
-            size_t length=0;
-            while(cursor<limit&&*cursor!='"') cursor++;
-            if(cursor>=limit) break;
-            cursor++;
-            while(cursor<limit&&*cursor!='"'&&length<sizeof(buffer)-1) buffer[length++]=*cursor++;
-            buffer[length]='\0';
-            char *end=NULL;
-            double x=strtod(buffer,&end);
-            if(end==buffer) break;
-            double y=strtod(end,&end);
-            (void)x;
-            if(isfinite(y)&&y>0.0) { *white_nits=y; return true; }
-            break;
-        }
-    }
-    return false;
-}
-
 static bool apply_local_matrix(const double xyz[3], double output[3])
 {
     static const char *xyz_names[3]={"rXYZ","gXYZ","bXYZ"};
@@ -1770,27 +1820,17 @@ static bool apply_local_clut(const double xyz[3], double output[3])
         values[row]=icc_table_sample(tag.data+input_offset+(size_t)row*in_count*2,in_count,mapped/(65535.0/32768.0));
         double position=fmax(0.0,fmin(1.0,values[row]))*(grid-1); base[row]=(int)position; if(base[row]>=grid-1)base[row]=grid-2; fraction[row]=position-base[row];
     }
-    double clut_result[3];
+    double clut_result[3]={0.0,0.0,0.0};
     for(int channel=0;channel<3;channel++) {
 #define CLUT_VALUE(dx,dy,dz) (read_be16(tag.data+clut_offset+(size_t)((((base[0]+(dx))*grid+(base[1]+(dy)))*grid+(base[2]+(dz)))*3+channel)*2)/65535.0)
-        double c000=CLUT_VALUE(0,0,0),c001=CLUT_VALUE(0,0,1);
-        double c010=CLUT_VALUE(0,1,0),c011=CLUT_VALUE(0,1,1);
-        double c100=CLUT_VALUE(1,0,0),c101=CLUT_VALUE(1,0,1);
-        double c110=CLUT_VALUE(1,1,0),c111=CLUT_VALUE(1,1,1);
-        double x=fraction[0],y=fraction[1],z=fraction[2];
-        /* ArgyllCMS uses tetrahedral interpolation for mft2 tables. Besides
-         * matching its profile validation, this matters greatly in the first
-         * HDR shadow cube where trilinear interpolation mixes all eight
-         * corners across a steep and chromatically uneven PQ response. */
-        if(x>=y) {
-            if(y>=z) clut_result[channel]=c000+x*(c100-c000)+y*(c110-c100)+z*(c111-c110);
-            else if(x>=z) clut_result[channel]=c000+x*(c100-c000)+z*(c101-c100)+y*(c111-c101);
-            else clut_result[channel]=c000+z*(c001-c000)+x*(c101-c001)+y*(c111-c101);
-        } else {
-            if(x>=z) clut_result[channel]=c000+y*(c010-c000)+x*(c110-c010)+z*(c111-c110);
-            else if(y>=z) clut_result[channel]=c000+y*(c010-c000)+z*(c011-c010)+x*(c111-c011);
-            else clut_result[channel]=c000+z*(c001-c000)+y*(c011-c001)+x*(c111-c011);
-        }
+        for(int red=0;red<2;red++)
+            for(int green=0;green<2;green++)
+                for(int blue=0;blue<2;blue++){
+                    double weight=(red?fraction[0]:1.0-fraction[0])
+                                 *(green?fraction[1]:1.0-fraction[1])
+                                 *(blue?fraction[2]:1.0-fraction[2]);
+                    clut_result[channel]+=CLUT_VALUE(red,green,blue)*weight;
+                }
 #undef CLUT_VALUE
     }
     for(int channel=0;channel<3;channel++) output[channel]=icc_table_sample(tag.data+output_offset+(size_t)channel*out_count*2,out_count,clut_result[channel]);
@@ -2085,20 +2125,11 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
      * source white for this conversion.  Using it here moved even requested
      * D65 white away from PCS white and produced a severe red/yellow cast. */
     if(!companion_adaptation(d65_white,adaptation))return false;
-    if(!strcmp(app.correction_signal_mode,"hdr10")&&!companion_characterization_white(&white_nits)){
+    if(!strcmp(app.correction_signal_mode,"hdr10")){
         IccTag lumi=icc_tag(app.correction_profile_data,app.correction_profile_size,"lumi");
         if(!lumi.data||lumi.size<20||memcmp(lumi.data,"XYZ ",4)||(white_nits=read_s15(lumi.data+12))<=0.0)return false;
     }
-    /* Without a calibration tag this is an ordinary ArgyllCMS display
-     * profile. Preserve source absolute colorimetry rather than adapting D65
-     * onto the display's native media white. */
-    if(!strcmp(app.correction_signal_mode,"hdr10")
-       && !icc_tag(app.correction_profile_data,app.correction_profile_size,"vcgt").data
-       && !icc_tag(app.correction_profile_data,app.correction_profile_size,"MHC2").data){
-        if(!companion_absolute_hdr_xyz(rgb,white_nits,xyz))return false;
-    }else{
-        companion_source_xyz(rgb,app.correction_signal_mode,white_nits,adaptation,xyz);
-    }
+    companion_source_xyz(rgb,app.correction_signal_mode,white_nits,adaptation,xyz);
     if(!strcmp(app.correction_mode,"clut")){if(!apply_local_clut(xyz,output))return false;}
     else if(!apply_local_matrix(xyz,output))return false;
     /* A 3D cLUT cannot resolve the steep PQ shadow axis at its grid spacing.
@@ -2960,6 +2991,8 @@ static bool try_create_renderer(bool hdr, const char *driver)
      * Attach BT.2020/PQ before the first frame reaches KWin. */
     if (!pgen_wayland_set_hdr_surface(
             app.window, hdr,
+            hdr && (!strcmp(app.correction_mode, "clut") ||
+                    !strcmp(app.correction_mode, "matrix")),
             hdr ? kwin_hdr_surface_reference(app.selected_display_id) : 0,
             app.command_min_luma, app.command_max_luma,
             app.command_max_cll, app.command_max_fall)) {
@@ -4115,7 +4148,17 @@ static void process_network_updates(void)
                 sizeof(message));
         }
         SDL_LockMutex(app.network_mutex);
-        if (ok) app.sequence = sequence;
+        if (ok) {
+            app.sequence = sequence;
+#ifndef _WIN32
+            /* Keep presenting throughout a meter integration. A few frames
+             * only fill the swapchain; stopping there can leave a stale image
+             * visible during long, low-light reads. Use elapsed time rather
+             * than a frame count so high-refresh displays get the same 15
+             * second interval. Each new patch resets it. */
+            app.refresh_until_ms = SDL_GetTicks() + 15000;
+#endif
+        }
         app.ack_sequence = sequence;
         app.ack_ok = ok;
         SDL_strlcpy(app.ack_message, message, sizeof(app.ack_message));
@@ -4569,10 +4612,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
      * with the active patch so KWin cannot present an older frame after a
      * series advances. Focus and expose events used to hide this by causing an
      * extra redraw, which is why Alt-Tab appeared to repair the patch. */
-    if (state->hdr && state->renderer && !render_current_frame())
-        return SDL_APP_FAILURE;
+    if (state->hdr && state->renderer && SDL_GetTicks() < state->refresh_until_ms) {
+        if (!render_current_frame()) return SDL_APP_FAILURE;
+    }
 #endif
-    SDL_Delay(5);
+    SDL_Delay(10);
     return state->quit ? SDL_APP_SUCCESS : SDL_APP_CONTINUE;
 }
 
