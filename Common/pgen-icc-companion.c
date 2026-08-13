@@ -82,6 +82,8 @@ typedef int socket_handle_t;
 #endif
 
 #define APP_VERSION "1.4.15"
+#define APP_BUILD "3"
+#define APP_TITLE "PGenerator+ Patch Companion " APP_VERSION " (build " APP_BUILD ")"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */
 #define PGEN_NEUTRAL_BLEND 0.06
@@ -1110,7 +1112,7 @@ display_selected:
             SDL_Window *moved = NULL;
             if (props) {
                 SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING,
-                                      "PGenerator+ Patch Companion");
+                                      APP_TITLE);
                 SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER,
                                       SDL_WINDOWPOS_CENTERED_DISPLAY(target));
                 SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER,
@@ -1866,17 +1868,12 @@ static double mhc2_curve_sample(const unsigned char *curve, uint32_t count,
  * bypassed once Advanced Color is on, so for HDR the Companion is the only
  * thing that can. A profile without the tag is left untouched.
  */
-/* Undo the MHC2 stage Windows applies to windowed output.
+/* Undo the MHC2 stage Windows applies to composed HDR output.
  *
- * In windowed mode Windows applies the active profile's MHC2 calibration to
- * the Companion's surface. When the Companion is also applying that profile's
- * cLUT, the display is corrected twice and the shadows overshoot -- which is
- * what lifted blacks in a windowed post-calibration read. Fullscreen does not
- * have the problem because Windows bypasses MHC2 for a borderless
- * monitor-covering swapchain, which is why the two modes disagreed.
- *
- * Pre-compensating with the inverse cancels the OS stage, so windowed and
- * fullscreen land on the same corrected output.
+ * Windows applies the active profile's MHC2 calibration to both the ordinary
+ * window and our borderless composed fullscreen swapchain. Explicit cLUT,
+ * matrix and no-correction modes pre-compensate with this inverse so only the
+ * transform selected in the Companion reaches the display.
  */
 static bool apply_mhc2_inverse(double rgb[3])
 {
@@ -2034,9 +2031,9 @@ static bool load_correction_lut(uint64_t revision)
 {
     FILE *file;
     long length;
-    /* "none" is a true passthrough: no profile is required and nothing is
-     * applied. "system" still needs the profile for the fullscreen MHC2
-     * stand-in below, so the two are only equivalent for readiness. */
+    /* System and none remain usable without a readable profile. Without one,
+     * system is ordinary OS handling and none can only fall back to submitting
+     * the source unchanged because there is no MHC2 stage to invert. */
     bool system_mode=!strcmp(app.correction_mode,"system")||!strcmp(app.correction_mode,"none");
     /* Never retain a transform from a previously selected profile if the new
      * LUT cannot be downloaded or decoded. A stale correction would produce a
@@ -2093,22 +2090,25 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
     static const double d65_white[3]={0.9504559,1.0,1.0890578};
     double adaptation[3][3];
 
-    /* Pure passthrough. Profiling selects this so the characterization
-     * measures the panel itself: on Windows "system" is NOT a no-correction
-     * mode, because the branch below deliberately applies MHC2 on fullscreen
-     * HDR where Windows would skip it. */
-    if(!strcmp(app.correction_mode,"none")) return true;
+    /* Windows 11 applies the active MHC2 transform to both ordinary windows
+     * and our borderless composed HDR swapchain. "None" therefore has to
+     * pre-cancel that OS stage; simply submitting the source values would
+     * still measure the active profile. Other platforms can pass through. */
+    if(!strcmp(app.correction_mode,"none")) {
+#ifdef _WIN32
+        if(app.correction_profile_data&&
+           !strcmp(app.correction_signal_mode,"hdr10"))
+            apply_mhc2_inverse(rgb);
+        *red=rgb[0];*green=rgb[1];*blue=rgb[2];
+#endif
+        return true;
+    }
     if(!strcmp(app.correction_mode,"system")){
 #ifdef _WIN32
-        /* Windows can bypass an HDR profile's MHC2 transform for a
-         * borderless monitor-covering swapchain even when DWM reports the
-         * presentation as composed. Apply that native HDR calibration stage
-         * ourselves for fullscreen Companion output. Windowed output remains
-         * OS-managed so Windows cannot apply the same MHC2 transform twice. */
-        if((app.fullscreen||app.settings_fullscreen)&&app.correction_profile_data&&
-           !strcmp(app.correction_signal_mode,"hdr10")&&apply_local_mhc2(rgb,output)){
-            *red=output[0];*green=output[1];*blue=output[2];
-        }
+        /* The swapchain is borderless and composed, not exclusive fullscreen.
+         * DWM applies the active profile's MHC2 stage in both window modes, so
+         * system handling must submit the source unchanged. Applying MHC2
+         * locally here corrects fullscreen patches twice. */
 #else
         /* KWin composites the assigned profile itself, including in HDR from
          * Plasma 6.7 on, so there is nothing here to stand in for - applying
@@ -2148,10 +2148,13 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
                 output[channel]=weight*direct[channel]+(1.0-weight)*output[channel];
         }
     }
-    if(!app.fullscreen&&!app.settings_fullscreen){
-        /* Windowed output still passes through the OS MHC2 stage, so cancel it
-         * here or the display is corrected twice. */
+    {
+#ifdef _WIN32
+        /* DWM will apply MHC2 after either borderless or windowed presentation.
+         * Cancel it before submitting an explicitly corrected cLUT/matrix
+         * result so that the requested transform reaches the display once. */
         apply_mhc2_inverse(output);
+#endif
     }
     *red = output[0]; *green = output[1]; *blue = output[2];
     return true;
@@ -3864,8 +3867,8 @@ static void poll_server(void)
     profile_name_hex(active_profile, profile_hex, sizeof(profile_hex));
     profile_name_hex(app.selected_display, display_hex, sizeof(display_hex));
     SDL_snprintf(path, sizeof(path),
-                 "/api/icc/companion/poll?token=%s&client=%s&version=%s&platform=%s&renderer=%s&hdr=%d&profile_hex=%s&display_hex=%s&swapchain_cs=%s&presentation=%s&output_max=%.3f&output_full=%.3f&output_bits=%u&transform=%s&transform_ready=%d&transform_note_hex=%s&source_r=%.6f&source_g=%.6f&source_b=%.6f&submitted_r=%.6f&submitted_g=%.6f&submitted_b=%.6f&build_argyll=%s",
-                 app.config.token, app.config.client, APP_VERSION,
+                 "/api/icc/companion/poll?token=%s&client=%s&version=%s&build=%s&platform=%s&renderer=%s&hdr=%d&profile_hex=%s&display_hex=%s&swapchain_cs=%s&presentation=%s&output_max=%.3f&output_full=%.3f&output_bits=%u&transform=%s&transform_ready=%d&transform_note_hex=%s&source_r=%.6f&source_g=%.6f&source_b=%.6f&submitted_r=%.6f&submitted_g=%.6f&submitted_b=%.6f&build_argyll=%s",
+                 app.config.token, app.config.client, APP_VERSION, APP_BUILD,
                  companion_platform(),
                  reported_renderer, reported_hdr_active ? 1 : 0, profile_hex,
                  display_hex,
@@ -4469,7 +4472,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
     app.network_mutex = SDL_CreateMutex();
     if (!app.network_mutex) return SDL_APP_FAILURE;
-    app.window = SDL_CreateWindow("PGenerator+ Patch Companion", 1280, 720,
+    app.window = SDL_CreateWindow(APP_TITLE, 1280, 720,
                                   SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE);
     if (!app.window) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
