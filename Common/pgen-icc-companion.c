@@ -1793,7 +1793,13 @@ static void companion_source_xyz(const double rgb[3], const char *signal_mode,
     static const double bt2020_xyz[3][3]={{0.6369580,0.1446169,0.1688810},{0.2627002,0.6779981,0.0593017},{0.0,0.0280727,1.0609851}};
     double linear[3], intermediate[3];
     for (int channel=0; channel<3; channel++) {
-        if (!strcmp(signal_mode,"hdr10")) linear[channel]=fmin(1.0,pq_to_nits(rgb[channel])/fmax(white_nits,1e-6));
+        /* Relative PCS deliberately exceeds 1.0 above the profile's measured
+         * white: the lut16 XYZ number encoding reserves headroom to 2.0 and
+         * HDR BToA input shapers use it to resolve highlights through the
+         * display rolloff. icc_table_sample clamps at the encoding limit, so
+         * clamping here at 1.0 would pin every brighter request to the
+         * measured-white code and diverge from a compositor's evaluation. */
+        if (!strcmp(signal_mode,"hdr10")) linear[channel]=pq_to_nits(rgb[channel])/fmax(white_nits,1e-6);
         else linear[channel]=rgb[channel]<=0.04045?rgb[channel]/12.92:pow((rgb[channel]+0.055)/1.055,2.4);
     }
     const double (*source)[3]=!strcmp(signal_mode,"hdr10")?bt2020_xyz:srgb_xyz;
@@ -1930,7 +1936,15 @@ static bool apply_mhc2_inverse(double rgb[3])
     return true;
 }
 
-static PGEN_UNUSED bool apply_vcgt(double rgb[3])
+/* Apply the profile's vcgt calibration to a device triple.
+ *
+ * vcgt is the standard post-transform stage: BToA emits device codes for the
+ * calibrated display and the video-card gamma table runs after it. In
+ * application-side correction modes nothing else loads that table, so the
+ * Companion applies it to the transform output here. HDR profiles that need
+ * grey-axis tracking beyond what a downstream 1D stage can express must
+ * incorporate the calibration into BToA instead of shipping a vcgt tag. */
+static bool apply_vcgt(double rgb[3])
 {
     IccTag tag=icc_tag(app.correction_profile_data,app.correction_profile_size,"vcgt");
     if(!tag.data||tag.size<18||memcmp(tag.data,"vcgt",4)) return false;
@@ -1954,56 +1968,6 @@ static PGEN_UNUSED bool apply_vcgt(double rgb[3])
         double second=read_be16(base+((size_t)low+1)*2)/65535.0;
         rgb[channel]=first*(1.0-fraction)+second*fraction;
     }
-    return true;
-}
-
-/* Sample one vcgt channel curve. */
-static bool vcgt_table(const unsigned char **table,uint32_t *entries)
-{
-    IccTag tag=icc_tag(app.correction_profile_data,app.correction_profile_size,"vcgt");
-    if(!tag.data||tag.size<18||memcmp(tag.data,"vcgt",4))return false;
-    if(read_be32(tag.data+8)!=0)return false;
-    uint32_t channels=read_be16(tag.data+12),count=read_be16(tag.data+14),size=read_be16(tag.data+16);
-    if(channels!=3||count<2||size!=2)return false;
-    if(tag.size<18u+(size_t)channels*count*2u)return false;
-    *table=tag.data+18;*entries=count;
-    return true;
-}
-
-static double vcgt_sample(const unsigned char *table,uint32_t entries,int channel,double value)
-{
-    if(!(value>0.0))value=0.0;
-    if(value>1.0)value=1.0;
-    double position=value*(double)(entries-1);
-    uint32_t low=(uint32_t)position;
-    if(low>entries-2)low=entries-2;
-    double fraction=position-(double)low;
-    const unsigned char *base=table+(size_t)channel*entries*2u;
-    double first=read_be16(base+(size_t)low*2)/65535.0;
-    double second=read_be16(base+((size_t)low+1)*2)/65535.0;
-    return first*(1.0-fraction)+second*fraction;
-}
-
-/* Apply vcgt to the SOURCE code rather than to the cLUT's output.
- *
- * vcgt is normally a post-transform stage, but that is precisely why it could
- * not fix the grey axis: the cLUT converts absolute PCS XYZ into a code, and
- * its shadow grid cannot resolve that conversion, so the error is already
- * baked in before vcgt ever sees the value. Measured on one panel, 5% stimulus
- * still landed 6.7x short of target with vcgt applied downstream.
- *
- * The calibration is parameterised on absolute PQ, so for a neutral patch the
- * correct device value is simply curve(code) -- no cLUT involved. That is the
- * same position MHC2 occupies, and the reason MHC2 tracks the grey axis while
- * a downstream vcgt cannot. Chromatic patches still need the cLUT, so the two
- * are blended by how neutral the request is rather than switched at a
- * threshold, which would put a seam one code off neutral.
- */
-static bool apply_vcgt_direct(const double rgb[3],double output[3])
-{
-    const unsigned char *table;uint32_t entries;
-    if(!vcgt_table(&table,&entries))return false;
-    for(int channel=0;channel<3;channel++)output[channel]=vcgt_sample(table,entries,channel,rgb[channel]);
     return true;
 }
 
@@ -2146,19 +2110,23 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
     /* A 3D cLUT cannot resolve the steep PQ shadow axis at its grid spacing.
      * Use the profile's own MHC2 calibration for exact and near-neutral HDR
      * requests, while chromatic requests continue through the selected cLUT
-     * or matrix transform. */
+     * or matrix transform. MHC2 is defined on wire codes, so it is the one
+     * correction that legitimately lives in the source domain. */
     {
         double direct[3];
         double high=rgb[0]>rgb[1]?(rgb[0]>rgb[2]?rgb[0]:rgb[2]):(rgb[1]>rgb[2]?rgb[1]:rgb[2]);
         double low=rgb[0]<rgb[1]?(rgb[0]<rgb[2]?rgb[0]:rgb[2]):(rgb[1]<rgb[2]?rgb[1]:rgb[2]);
         double spread=high-low;
         double weight=1.0-spread/PGEN_NEUTRAL_BLEND;
-        if(weight>0.0&&(apply_local_mhc2(rgb,direct)||apply_vcgt_direct(rgb,direct))){
+        if(weight>0.0&&apply_local_mhc2(rgb,direct)){
             if(weight>1.0)weight=1.0;
             for(int channel=0;channel<3;channel++)
                 output[channel]=weight*direct[channel]+(1.0-weight)*output[channel];
         }
     }
+    /* Standard ICC order: vcgt runs on the transform's device output, exactly
+     * where a video-card gamma table would. */
+    apply_vcgt(output);
     {
 #ifdef _WIN32
         /* DWM will apply MHC2 after either borderless or windowed presentation.
