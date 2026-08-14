@@ -23,9 +23,13 @@ warning.
 
 ## Current release
 
-Version 1.4.17 is paired with the pgen23 KWin build. The Patch Companion in
+Version 1.4.18 is paired with the pgen24 KWin build. The Patch Companion in
 this release:
 
+- preserves HDR relative-PCS headroom above measured white so B2A input
+  shapers can represent a display's highlight rolloff;
+- applies VCGT after the B2A device transform in standard ICC order, while
+  retaining the encoded-domain neutral path used by MHC2;
 - keeps polling PGenerator+ while Windows installs a profile, preventing the
   WebUI from reporting that Companion disconnected during a slow Windows
   color-management call;
