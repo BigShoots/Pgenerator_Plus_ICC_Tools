@@ -389,6 +389,7 @@ int main(int argc, const char *argv[])
                 printf("WARNING: the Metal layer has no drawable size; nothing "
                        "can be presented\n");
         }
+
         [window makeKeyAndOrderFront:nil];
         /* orderFrontRegardless is the one that works for a process the user
          * never launched from the Dock. */
@@ -397,6 +398,50 @@ int main(int argc, const char *argv[])
         else [NSApp activateIgnoringOtherApps:YES];
 
         id<MTLCommandQueue> queue = [layer.device newCommandQueue];
+
+        /* Run this only after the first frames are up: the window server does
+         * not list a window as on screen until it has been composited, so
+         * asking during setup always reports a false absence. */
+        void (^report_on_screen)(void) = ^{
+
+            /* Ask the window server where this window actually ended up, rather
+         * than where AppKit was asked to put it. "The window exists" and "the
+         * window is visible on the display I meant" are different claims, and
+         * only the second one matters when a meter is pointed at a panel. */
+        {
+            CGRect target = CGDisplayBounds(display);
+            CGWindowID number = (CGWindowID)window.windowNumber;
+            CFArrayRef list = CGWindowListCopyWindowInfo(
+                kCGWindowListOptionIncludingWindow, number);
+            bool found = false;
+            for (NSDictionary *entry in (__bridge NSArray *)list) {
+                CGRect where;
+                if (!CGRectMakeWithDictionaryRepresentation(
+                        (__bridge CFDictionaryRef)entry[(id)kCGWindowBounds], &where))
+                    continue;
+                found = true;
+                printf("on screen    %.0fx%.0f at (%.0f,%.0f), level %s, alpha %s\n",
+                       where.size.width, where.size.height,
+                       where.origin.x, where.origin.y,
+                       [entry[(id)kCGWindowLayer] stringValue].UTF8String,
+                       [entry[(id)kCGWindowAlpha] stringValue].UTF8String);
+                printf("display is   %.0fx%.0f at (%.0f,%.0f)\n",
+                       target.size.width, target.size.height,
+                       target.origin.x, target.origin.y);
+                if (fabs(where.origin.x - target.origin.x) > 4 ||
+                    fabs(where.origin.y - target.origin.y) > 4)
+                    printf("WARNING: the window is NOT over the display it was "
+                           "asked for. Nothing will appear there.\n");
+                if ([entry[(id)kCGWindowAlpha] doubleValue] < 0.99)
+                    printf("WARNING: the window is transparent.\n");
+            }
+            if (list) CFRelease(list);
+            if (!found)
+                printf("WARNING: the window server does not list this window as "
+                       "on screen at all.\n");
+            fflush(stdout);
+        }
+            };
 
         /* One flat colour per drawable. clearColor components map straight onto
          * the 10-bit format, so code/1023 lands on the code exactly. */
@@ -455,6 +500,7 @@ int main(int argc, const char *argv[])
                 printf("  both look right   -> INVALID, the profile is not in the path\n");
             }
             for (int frame = 0; frame < 3; frame++) { present(r, g, b); pump(0.2); }
+            report_on_screen();
             if (dwell > 0.0) {
                 printf("holding for %.0fs\n", dwell);
                 fflush(stdout);

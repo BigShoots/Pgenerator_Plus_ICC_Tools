@@ -89,35 +89,115 @@ read_meter() {
 
 METER_PORT=""
 LAST_METER_OUTPUT=""
+DISPLAY_ID=""
 
-# Position the meter with the patch actually up, before committing to a run.
+measure() {
+    local layout=$1 label=$2 result probe_err
+    probe_err=$(mktemp)
+    ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" "$layout" 255,0,0 \
+        --dwell "$DWELL" >/dev/null 2>"$probe_err" &
+    local probe=$!
+    sleep 3
+    if ! kill -0 $probe 2>/dev/null; then
+        echo "  $label: the patch window exited early. Probe said:" >&2
+        sed 's/^/    /' "$probe_err" >&2
+        rm -f "$probe_err"
+        echo ""
+        return
+    fi
+    result=$(read_meter)
+    wait $probe 2>/dev/null
+    rm -f "$probe_err"
+    if [ -z "$result" ]; then
+        echo "  $label: no reading. spotread said:" >&2
+        echo "$LAST_METER_OUTPUT" | sed 's/^/    /' >&2
+        echo ""
+        return
+    fi
+    echo "$result"
+}
+
+# measure() always shows red; this takes any fill, for the aiming test.
+measure_fill() {
+    local fill=$1 label=$2 result probe_err
+    probe_err=$(mktemp)
+    ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" --sdr-ours "$fill" \
+        --dwell "$DWELL" >"$probe_err" 2>&1 &
+    local probe=$!
+    sleep 3
+    if ! kill -0 $probe 2>/dev/null; then
+        echo "  $label: the patch window exited early:" >&2
+        sed 's/^/    /' "$probe_err" >&2
+        rm -f "$probe_err"; echo ""; return
+    fi
+    result=$(read_meter)
+    kill $probe 2>/dev/null; wait $probe 2>/dev/null
+    grep -E "^window |^metal layer|nil - nothing|WARNING: the Metal" "$probe_err" \
+        | sed 's/^/    /' >&2
+    rm -f "$probe_err"
+    if [ -z "$result" ]; then
+        echo "  $label: no reading. spotread said:" >&2
+        echo "$LAST_METER_OUTPUT" | sed 's/^/    /' >&2
+        echo ""; return
+    fi
+    echo "$result"
+}
+
+
+# Position the meter, and prove it is looking at the display at all.
+#
+# The test is differential: measure the same spot with the display filled black
+# and then filled red. If the two readings match, the meter is not seeing this
+# screen - it is reading ambient light, or facing the wrong way, or the patch is
+# not being displayed. That distinction is invisible to any single reading.
 if [ $# -ge 2 ] && [ "$1" = "--aim" ]; then
     check_meter || exit 1
     DISPLAY_ID=$2
     echo
-    echo "showing red on $DISPLAY_ID for 40s. Move the meter onto that display,"
-    echo "roughly centred, and watch the readings settle."
-    ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" --sdr-ours 255,0,0 \
-        --dwell 40 2>&1 | grep -E "^display|WARNING" &
-    sleep 3
-    for attempt in 1 2 3 4 5; do
-        reading=$(read_meter)
-        if [ -z "$reading" ]; then
-            echo "  no reading. spotread said:" >&2
-            echo "$LAST_METER_OUTPUT" | sed 's/^/    /' >&2
-            break
-        fi
-        set -- $reading
-        echo "  Y $1  x $2  y $3"
-        python3 -c "
+    echo "A full-screen patch will appear on $DISPLAY_ID."
+    echo "Put the meter flat against that screen, roughly centred, lens open."
+    echo "On an i1 Display Pro the diffuser arm must be rotated AWAY from the"
+    echo "lens - with it closed the meter reads the room, not the display."
+    echo
+    sleep 2
+
+    echo "showing BLACK..."
+    BLACK=$(measure_fill 0,0,0 black)
+    echo "  ${BLACK:-(none)}"
+    echo "showing RED..."
+    RED=$(measure_fill 255,0,0 red)
+    echo "  ${RED:-(none)}"
+
+    python3 - "${BLACK:-}" "${RED:-}" <<'AIMPY'
 import sys
-x, y = float('$2'), float('$3')
-d = ((x-0.313)**2 + (y-0.329)**2) ** 0.5
-print('    ' + ('ON the red patch' if d > 0.15 and x > 0.45
-      else 'NOT on the patch - this reads neutral' if d < 0.15
-      else 'saturated, but not red'))"
-    done
-    pkill -f pgen-macos-hdr-probe 2>/dev/null
+def parse(t):
+    p = t.split()
+    return [float(v) for v in p] if len(p) == 3 else None
+black, red = parse(sys.argv[1]), parse(sys.argv[2])
+print()
+if not black or not red:
+    print("  no readings - the reason is printed above.")
+    raise SystemExit(1)
+bY, bx, by = black
+rY, rx, ry = red
+print(f"  black   Y {bY:8.3f}  x {bx:.4f}  y {by:.4f}")
+print(f"  red     Y {rY:8.3f}  x {rx:.4f}  y {ry:.4f}")
+ratio = rY / bY if bY > 0.001 else 999.0
+print(f"  red/black luminance ratio  {ratio:.2f}")
+print()
+if ratio < 1.3:
+    print("  NOT SEEING THE DISPLAY.")
+    print("  Black and red measured the same, so the meter is not reading this")
+    print("  screen. Check, in order:")
+    print("    - the i1's diffuser arm is rotated away from the lens")
+    print("    - the meter is flat against the VE228, not the built-in display")
+    print("    - a full-screen patch actually appeared on that display")
+elif rx > 0.45:
+    print("  ON THE RED PATCH. Ready - run the experiment.")
+else:
+    print(f"  Seeing the display (it responded), but red measured x {rx:.3f}")
+    print("  rather than about 0.64. Something is already transforming it.")
+AIMPY
     exit 0
 fi
 
@@ -242,31 +322,6 @@ echo "assigning it to $DISPLAY_ID..."
 ASSIGNED=1
 sleep 2
 
-measure() {
-    local layout=$1 label=$2 result probe_err
-    probe_err=$(mktemp)
-    ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" "$layout" 255,0,0 \
-        --dwell "$DWELL" >/dev/null 2>"$probe_err" &
-    local probe=$!
-    sleep 3
-    if ! kill -0 $probe 2>/dev/null; then
-        echo "  $label: the patch window exited early. Probe said:" >&2
-        sed 's/^/    /' "$probe_err" >&2
-        rm -f "$probe_err"
-        echo ""
-        return
-    fi
-    result=$(read_meter)
-    wait $probe 2>/dev/null
-    rm -f "$probe_err"
-    if [ -z "$result" ]; then
-        echo "  $label: no reading. spotread said:" >&2
-        echo "$LAST_METER_OUTPUT" | sed 's/^/    /' >&2
-        echo ""
-        return
-    fi
-    echo "$result"
-}
 
 echo
 echo "measuring OUR layer (colorspace nil)  - keep the meter still..."
