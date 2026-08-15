@@ -248,6 +248,25 @@ if [ $# -ge 2 ] && [ "$1" = "--vcgt" ]; then
     echo "building a profile that differs by exactly two bytes..."
     python3 make-permuted-profile.py build "$ORIGINAL" /tmp/pgen-permuted-vcgt.icc \
         --minimal || exit 1
+
+    # Verify what was actually built, rather than trusting that the right code
+    # ran. A stale copy of make-permuted-profile.py silently produced a full
+    # rebuild once, and the run looked normal while comparing two profiles that
+    # differed in far more than their colorants - which is precisely the
+    # confound this mode exists to remove.
+    DIFFERING=$(cmp -l "$ORIGINAL" /tmp/pgen-permuted-vcgt.icc 2>/dev/null | wc -l | tr -d " ")
+    if [ "${DIFFERING:-0}" != "2" ]; then
+        echo >&2
+        echo "  ABORTING: that profile differs from the original in ${DIFFERING:-many}" >&2
+        echo "  bytes, not 2. The minimal builder did not run, so this comparison" >&2
+        echo "  would be measuring more than the colorants and could not answer" >&2
+        echo "  the question. Nothing has been assigned." >&2
+        echo >&2
+        echo "  Check that make-permuted-profile.py in this folder has" >&2
+        echo "  build_minimal - it is missing from stale copies." >&2
+        exit 1
+    fi
+    echo "  verified: exactly 2 bytes differ from the display's own profile"
     ./pgen-colorsync-probe assign "$DISPLAY_ID" /tmp/pgen-permuted-vcgt.icc >/dev/null \
         || { echo "assignment failed" >&2; exit 1; }
     ASSIGNED=1

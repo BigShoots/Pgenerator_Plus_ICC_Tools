@@ -24,7 +24,7 @@ show a pure red patch.
 
 Usage:
     make-permuted-profile.py inspect SOURCE.icc
-    make-permuted-profile.py build   SOURCE.icc OUTPUT.icc [--keep-vcgt]
+    make-permuted-profile.py build   SOURCE.icc OUTPUT.icc [--keep-vcgt|--minimal]
 
 --keep-vcgt leaves the video card gamma table in place. Use it to separate the
 two stages: vcgt is loaded into the GPU and applied after compositing, so it
@@ -66,6 +66,42 @@ def inspect(path):
             x, y, z = struct.unpack(">iii", data[offset + 8:offset + 20])
             extra = f"  X={x / 65536:.4f} Y={y / 65536:.4f} Z={z / 65536:.4f}"
         print(f"    {name}  type={kind}  offset={offset} size={size}{extra}")
+
+
+def build_minimal(source_path, output_path):
+    """Swap only the rXYZ and gXYZ tag signatures, in place.
+
+    Every other byte is left exactly as it was: same tags, same offsets, same
+    payloads, same length. This is the only version that isolates a single
+    variable.
+
+    The fuller build() rewrites the profile and drops Apple's private tags
+    (aarg/aabg/aagg parametric gamma, ndin, mmod). Those may feed the GPU
+    transfer table the way vcgt does, in which case dropping them changes what
+    an unmanaged layer measures - a change to the GPU path, not the ICC path,
+    which confounds the experiment entirely.
+    """
+    data = bytearray(open(source_path, "rb").read())
+    tags = read_tag_table(data)
+
+    swap = {b"rXYZ": b"gXYZ", b"gXYZ": b"rXYZ"}
+    swapped = 0
+    for index, (signature, _, _) in enumerate(tags):
+        if signature not in swap:
+            continue
+        base = 132 + index * 12
+        data[base:base + 4] = swap[signature]
+        swapped += 1
+
+    if swapped != 2:
+        raise SystemExit(f"expected rXYZ and gXYZ; swapped {swapped} tag(s)")
+
+    # The profile ID is an MD5 of the content; zero it rather than leave a
+    # stale one, so ColorSync recomputes instead of matching a cached profile.
+    data[84:100] = b"\x00" * 16
+    open(output_path, "wb").write(bytes(data))
+    print(f"wrote {output_path}  ({len(data)} bytes, byte-identical to the "
+          "source except the two swapped tag signatures)")
 
 
 def build(source_path, output_path, keep_vcgt=False):
@@ -149,7 +185,10 @@ def main():
         if len(args) < 2:
             print("build needs SOURCE and OUTPUT")
             return 2
-        build(args[0], args[1], keep_vcgt="--keep-vcgt" in sys.argv)
+        if "--minimal" in sys.argv:
+            build_minimal(args[0], args[1])
+        else:
+            build(args[0], args[1], keep_vcgt="--keep-vcgt" in sys.argv)
     else:
         print(f"unknown command: {command}")
         return 2
