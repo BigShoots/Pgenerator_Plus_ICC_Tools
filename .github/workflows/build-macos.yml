@@ -1,0 +1,114 @@
+# Builds the macOS (Apple Silicon) ICC Tools package: the Patch Companion
+# against Homebrew SDL3, plus colprof and profcheck from the ArgyllCMS fork's
+# Jam build. Every compile step fails the job on error; the result is one ZIP
+# with executable bits preserved, uploaded as a workflow artifact. (The
+# artifact download wraps that ZIP in a second ZIP - that outer layer is
+# GitHub's, and the permissions inside ours survive.)
+
+name: build-macos
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - macos-port
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - name: Check out ICC Tools
+        uses: actions/checkout@v4
+
+      - name: Check out the ArgyllCMS fork
+        uses: actions/checkout@v4
+        with:
+          repository: BigShoots/ArgyllCMS_ICC4.4
+          ref: feature/icc44-cicp
+          path: argyll
+
+      - name: Install SDL3
+        run: |
+          brew update
+          brew install sdl3
+          SDL3_VERSION="$(brew list --versions sdl3 | awk '{print $2}')"
+          echo "SDL3 ${SDL3_VERSION} at $(brew --prefix sdl3)"
+          # The Metal EDR path and the HDR window properties need SDL 3.2+.
+          if [ "$(printf '%s\n' "3.2.0" "${SDL3_VERSION}" | sort -V | head -1)" != "3.2.0" ]; then
+            echo "SDL3 ${SDL3_VERSION} is older than 3.2.0" >&2
+            exit 1
+          fi
+
+      - name: Build Patch Companion
+        run: |
+          SDL3_PREFIX="$(brew --prefix sdl3)"
+          clang -O2 -std=gnu11 -Wall -Wextra -ILinux -ICommon \
+                -I"${SDL3_PREFIX}/include" \
+                Common/pgen-icc-companion.c \
+                -o PGenPatchCompanion \
+                -L"${SDL3_PREFIX}/lib" -lSDL3 -lm \
+                -framework CoreGraphics -framework ColorSync -framework CoreFoundation
+          file PGenPatchCompanion
+          file PGenPatchCompanion | grep -q arm64
+
+      - name: Build jam (Argyll's patched ftjam)
+        run: |
+          curl -fsSL -o ajam.tgz https://www.argyllcms.com/ajam-2.5.2-1.3.3.tgz
+          tar xzf ajam.tgz
+          # 2008-era C: modern clang promotes these to errors by default.
+          make -C ajam-2.5.2-1.3.3 jam0 CC=clang \
+               CFLAGS="-O2 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+          ./ajam-2.5.2-1.3.3/jam0 -v
+
+      - name: Build colprof and profcheck
+        working-directory: argyll
+        run: |
+          # The fork has prebuilt Linux artifacts committed to git. A fresh
+          # checkout gives them the same timestamps as the sources, which jam
+          # reads as up to date, so they must go before the build or a foreign
+          # binary would be packaged unchanged.
+          find . -type f \( -name '*.o' -o -name '*.a' \) -delete
+          rm -f gamut/GenRMGam imdi/cctiff imdi/greytiff profile/colprof render/timage \
+                spectro/chartread spectro/oeminst spectro/spotread tiff/mkg3states
+          # Jambase reads these to pick host flags; bash does not export them.
+          export OSTYPE MACHTYPE HOSTTYPE
+          ../ajam-2.5.2-1.3.3/jam0 -q -fJambase -j3 '<profile>colprof' '<profile>profcheck'
+          file profile/colprof profile/profcheck
+          file profile/colprof | grep -q arm64
+          file profile/profcheck | grep -q arm64
+          (./profile/colprof 2>&1 || true) | grep -m1 Version
+          (./profile/profcheck 2>&1 || true) | grep -m1 Version
+
+      - name: Bundle
+        run: |
+          mkdir bundle
+          cp PGenPatchCompanion bundle/
+          # Point the Companion at the dylib beside it instead of the Homebrew
+          # path, so no launcher script is needed. Rewriting the load command
+          # invalidates the ad-hoc signature, so re-sign afterwards.
+          SDL3_LINKED="$(otool -L bundle/PGenPatchCompanion | awk '/libSDL3/ {print $1; exit}')"
+          test -n "${SDL3_LINKED}"
+          cp "${SDL3_LINKED}" bundle/
+          install_name_tool -change "${SDL3_LINKED}" \
+                            "@loader_path/$(basename "${SDL3_LINKED}")" \
+                            bundle/PGenPatchCompanion
+          codesign --force --sign - bundle/PGenPatchCompanion
+          otool -L bundle/PGenPatchCompanion
+          otool -L bundle/PGenPatchCompanion | grep -q '@loader_path/libSDL3'
+          cp argyll/profile/colprof argyll/profile/profcheck bundle/
+          cp licenses/SDL3-LICENSE.txt licenses/DejaVu-LICENSE.txt \
+             licenses/ArgyllCMS-LICENSE.txt bundle/
+          cp macOS/README.txt bundle/README.txt
+          cp Common/PGenPatchCompanion.template.conf bundle/PGenPatchCompanion.conf
+          chmod +x bundle/PGenPatchCompanion bundle/colprof bundle/profcheck
+          (cd bundle && zip -X -r ../PGeneratorPlus-ICC-Tools-macOS-arm64.zip .)
+          unzip -l PGeneratorPlus-ICC-Tools-macOS-arm64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PGeneratorPlus-ICC-Tools-macOS-arm64
+          path: PGeneratorPlus-ICC-Tools-macOS-arm64.zip
+          if-no-files-found: error
