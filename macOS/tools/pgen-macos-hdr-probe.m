@@ -359,25 +359,42 @@ int main(int argc, const char *argv[])
              *
              * Without the control, "both right" and "halves differ" look
              * identical from the left half alone. */
-            CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            CGFloat components[4] = {sdr_rgb[0] / 255.0, sdr_rgb[1] / 255.0,
-                                     sdr_rgb[2] / 255.0, 1.0};
-            CGColorRef control = CGColorCreate(srgb, components);
-            view.layer = [CALayer layer];
-            view.layer.backgroundColor = control;
-            CGColorRelease(control);
-            CGColorSpaceRelease(srgb);
+            if (sdr_layout == 1) {
+                /* Match SDL exactly: SDL_Metal_CreateView returns a view whose
+                 * layerClass IS CAMetalLayer, so the Metal layer is the view's
+                 * OWN layer and gets its own surface.
+                 *
+                 * Hosting it as a SUBLAYER instead - which this did - puts its
+                 * content through the window's colour-managed backing store on
+                 * the way to the screen, so it is no longer measuring what the
+                 * Companion actually does. That showed up as a partial shift
+                 * toward the parent layer's colour, with luminance rising
+                 * because a second colour was being added. */
+                layer.frame = view.bounds;
+                layer.opaque = YES;
+                view.layer = layer;
+            } else {
+                CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+                CGFloat components[4] = {sdr_rgb[0] / 255.0, sdr_rgb[1] / 255.0,
+                                         sdr_rgb[2] / 255.0, 1.0};
+                CGColorRef control = CGColorCreate(srgb, components);
+                view.layer = [CALayer layer];
+                view.layer.backgroundColor = control;
+                CGColorRelease(control);
+                CGColorSpaceRelease(srgb);
 
-            if (sdr_layout == 0) {
-                CGRect half = view.bounds;
-                half.size.width /= 2.0;
-                layer.frame = half;
-                [view.layer addSublayer:layer];
-            } else if (sdr_layout == 1) {
-                layer.frame = view.bounds;      /* our layer, full screen */
-                [view.layer addSublayer:layer];
+                if (sdr_layout == 0) {
+                    /* The split view keeps the sublayer arrangement, so it is
+                     * the less faithful of the two. Use --sdr-ours for anything
+                     * being measured. */
+                    CGRect half = view.bounds;
+                    half.size.width /= 2.0;
+                    layer.frame = half;
+                    layer.opaque = YES;
+                    [view.layer addSublayer:layer];
+                }
+                /* sdr_layout == 2 leaves the control layer alone, full screen. */
             }
-            /* sdr_layout == 2 leaves the control layer alone, full screen. */
         } else {
             view.layer = layer;
         }
