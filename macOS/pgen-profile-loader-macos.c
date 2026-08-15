@@ -36,6 +36,7 @@
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_tray.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -141,6 +142,27 @@ typedef struct {
     StatusLevel status_level;
 
     uint64_t next_verify_ms;
+    /* Self-healing, on the Windows loader's model rather than the Linux one.
+     * macOS genuinely drops a display's profile assignment - on hotplug, on a
+     * resolution or refresh change, and on wake with some external panels - so
+     * reporting alone would leave someone uncalibrated without knowing.
+     *
+     * The guard rails are what stop a self-healer turning into a fight with
+     * the user: act only on a second consecutive mismatch, at most one
+     * reassociation a minute, never reinstall from the timer, and give up
+     * after three failures rather than retrying forever. */
+    int mismatch_count;
+    int reapply_failures;
+    uint64_t last_reapply_ms;
+    bool reapply_attempted;
+    bool auto_reapply;
+    /* Menu-bar item, matching the Windows loader's tray. The Linux build has
+     * none, so this is parity with Windows rather than with the sibling. It is
+     * how the loader stays useful while its window is closed - which is the
+     * normal state for something whose job is to keep watching. */
+    SDL_Tray *tray;
+    SDL_TrayEntry *tray_status;
+    SDL_TrayEntry *tray_auto;
     bool dialog_open;
     PromptKind prompt;
     bool colord_prompt_done;   /* Declined or acknowledged - do not nag again */
@@ -1959,6 +1981,8 @@ static void update_metrics(void)
     SDL_SetRenderScale(app.renderer, app.density, app.density);
 }
 
+static void create_tray(void);
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
     SDL_zero(app);
@@ -2049,6 +2073,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     /* Checked once here, not per frame, and never raised again once answered. */
     if (app.silent_apply) app.colord_prompt_done = true;
     if (!app.colord_prompt_done) app.prompt = colour_system_prompt();
+    app.auto_reapply = !app.silent_apply;
+    /* A one-shot companion install has no business planting a menu-bar item. */
+    if (!app.silent_apply) create_tray();
     app.next_verify_ms = SDL_GetTicks() + VERIFY_INTERVAL_MS;
     *appstate = &app;
     return SDL_APP_CONTINUE;
@@ -2069,7 +2096,11 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
     case SDL_EVENT_DISPLAY_ADDED:
     case SDL_EVENT_DISPLAY_REMOVED:
     case SDL_EVENT_DISPLAY_MOVED:
+    case SDL_EVENT_DISPLAY_ORIENTATION:
         snapshot_sdl_displays();
+        /* These are exactly the events after which macOS drops a display's
+         * profile, so check now rather than waiting out the 5s tick. */
+        app.next_verify_ms = SDL_GetTicks();
         break;
     case SDL_EVENT_KEY_DOWN:
         if (event->key.key == SDLK_ESCAPE) {
@@ -2183,6 +2214,176 @@ static void write_companion_result(void)
     fclose(file);
 }
 
+/* Reassociate a profile macOS has dropped, but only once it is clear that it
+ * really has been dropped and only at a rate that cannot become a loop.
+ *
+ * The check is against WindowServer rather than the ColorSync device database,
+ * because the database keeps reporting the assignment it recorded even after
+ * the compositor has stopped honouring it - which is precisely the failure
+ * being healed. */
+static void maybe_self_heal(void)
+{
+    DisplayEntry *display;
+    uint64_t now = SDL_GetTicks();
+    char message[512] = "";
+
+    if (!app.auto_reapply || app.silent_apply) return;
+    if (!app.selected_profile[0]) return;
+    if (app.reapply_failures >= 3) return;
+
+    display = selected_display();
+    if (!display) return;
+
+    if (pgen_macos_windowserver_uses(display->name, app.selected_profile)) {
+        app.mismatch_count = 0;
+        app.reapply_attempted = false;
+        app.reapply_failures = 0;
+        return;
+    }
+
+    /* One mismatch is not evidence: a display in the middle of a mode change
+     * reports whatever it likes for a moment. */
+    if (++app.mismatch_count < 2) return;
+    if (app.reapply_attempted && now - app.last_reapply_ms < 60000) return;
+
+    app.reapply_attempted = true;
+    app.last_reapply_ms = now;
+
+    /* Reassociate only. Never reinstall from the timer - the file is already
+     * where it belongs, and reinstalling would be a write nobody asked for. */
+    if (pgen_macos_assign_profile(display->name, app.selected_profile,
+                                  message, sizeof(message))) {
+        SDL_Log("macOS: reapplied %s to %s after %d consecutive mismatches",
+                app.selected_profile, display->model, app.mismatch_count);
+        app.mismatch_count = 0;
+    } else {
+        app.reapply_failures++;
+        SDL_Log("macOS: could not reapply %s to %s (attempt %d of 3): %s",
+                app.selected_profile, display->model, app.reapply_failures,
+                message[0] ? message : "no detail reported");
+        if (app.reapply_failures >= 3)
+            set_status(STATUS_BAD, "REAPPLY GAVE UP",
+                       "macOS keeps dropping this profile and three attempts to "
+                       "reapply it failed. Apply it by hand, or check whether the "
+                       "display changed mode.");
+    }
+}
+
+/* Green when the selected profile is the one WindowServer is using, red
+ * otherwise - the same two-state signal the Windows tray gives. Drawn rather
+ * than shipped as an asset, because two flat squares are not worth a file. */
+static SDL_Surface *tray_icon_surface(bool healthy)
+{
+    SDL_Surface *surface = SDL_CreateSurface(22, 22, SDL_PIXELFORMAT_RGBA32);
+    if (!surface) return NULL;
+    SDL_FillSurfaceRect(surface, NULL,
+                        SDL_MapSurfaceRGBA(surface, 0, 0, 0, 0));
+    SDL_Rect body = {3, 3, 16, 16};
+    if (healthy) SDL_FillSurfaceRect(surface, &body, SDL_MapSurfaceRGBA(surface, 46, 160, 67, 255));
+    else         SDL_FillSurfaceRect(surface, &body, SDL_MapSurfaceRGBA(surface, 218, 54, 51, 255));
+    return surface;
+}
+
+static void SDLCALL tray_show_window(void *userdata, SDL_TrayEntry *entry)
+{
+    (void)userdata; (void)entry;
+    SDL_ShowWindow(app.window);
+    SDL_RaiseWindow(app.window);
+}
+
+static void SDLCALL tray_reapply_now(void *userdata, SDL_TrayEntry *entry)
+{
+    (void)userdata; (void)entry;
+    start_action(ACTION_APPLY);
+}
+
+static void SDLCALL tray_verify_now(void *userdata, SDL_TrayEntry *entry)
+{
+    (void)userdata; (void)entry;
+    app.next_verify_ms = SDL_GetTicks();
+}
+
+static void SDLCALL tray_toggle_auto(void *userdata, SDL_TrayEntry *entry)
+{
+    (void)userdata;
+    app.auto_reapply = SDL_GetTrayEntryChecked(entry);
+}
+
+static void SDLCALL tray_open_settings(void *userdata, SDL_TrayEntry *entry)
+{
+    (void)userdata; (void)entry;
+    pgen_macos_open_display_settings();
+}
+
+static void SDLCALL tray_quit(void *userdata, SDL_TrayEntry *entry)
+{
+    (void)userdata; (void)entry;
+    SDL_Event quit = {0};
+    quit.type = SDL_EVENT_QUIT;
+    SDL_PushEvent(&quit);
+}
+
+static void create_tray(void)
+{
+    SDL_Surface *icon = tray_icon_surface(false);
+    SDL_TrayMenu *menu;
+
+    app.tray = SDL_CreateTray(icon, APP_NAME);
+    if (icon) SDL_DestroySurface(icon);
+    if (!app.tray) {
+        /* Not fatal - the window still works - but silence here would look
+         * like the menu-bar item was never meant to exist. */
+        SDL_Log("macOS: could not create the menu-bar item: %s", SDL_GetError());
+        return;
+    }
+    SDL_Log("macOS: menu-bar item created");
+
+    menu = SDL_CreateTrayMenu(app.tray);
+    if (!menu) return;
+
+    app.tray_status = SDL_InsertTrayEntryAt(menu, -1, "Checking...", SDL_TRAYENTRY_DISABLED);
+    SDL_InsertTrayEntryAt(menu, -1, NULL, 0);   /* separator */
+    SDL_SetTrayEntryCallback(SDL_InsertTrayEntryAt(menu, -1, "Open Profile Loader", 0),
+                             tray_show_window, NULL);
+    SDL_SetTrayEntryCallback(SDL_InsertTrayEntryAt(menu, -1, "Reapply now", 0),
+                             tray_reapply_now, NULL);
+    SDL_SetTrayEntryCallback(SDL_InsertTrayEntryAt(menu, -1, "Verify now", 0),
+                             tray_verify_now, NULL);
+    app.tray_auto = SDL_InsertTrayEntryAt(menu, -1, "Automatically reapply",
+                                          SDL_TRAYENTRY_CHECKBOX);
+    if (app.tray_auto) {
+        SDL_SetTrayEntryChecked(app.tray_auto, app.auto_reapply);
+        SDL_SetTrayEntryCallback(app.tray_auto, tray_toggle_auto, NULL);
+    }
+    SDL_InsertTrayEntryAt(menu, -1, NULL, 0);
+    SDL_SetTrayEntryCallback(SDL_InsertTrayEntryAt(menu, -1, "Display settings...", 0),
+                             tray_open_settings, NULL);
+    SDL_InsertTrayEntryAt(menu, -1, NULL, 0);
+    SDL_SetTrayEntryCallback(SDL_InsertTrayEntryAt(menu, -1, "Quit", 0),
+                             tray_quit, NULL);
+}
+
+/* Called after each verify, so the menu bar carries the answer without the
+ * window having to be open. */
+static void update_tray(void)
+{
+    static StatusLevel last = (StatusLevel)-1;
+    if (!app.tray) return;
+    if (app.tray_status) {
+        char label[192];
+        SDL_snprintf(label, sizeof(label), "%s - %s", app.status_heading,
+                     app.status_detail[0] ? app.status_detail : "no detail");
+        char *newline = strchr(label, '\n');
+        if (newline) *newline = '\0';
+        SDL_SetTrayEntryLabel(app.tray_status, label);
+    }
+    if (app.status_level != last) {
+        SDL_Surface *icon = tray_icon_surface(app.status_level == STATUS_OK);
+        if (icon) { SDL_SetTrayIcon(app.tray, icon); SDL_DestroySurface(icon); }
+        last = app.status_level;
+    }
+}
+
 SDL_AppResult SDL_AppIterate(void *appstate)
 {
     (void)appstate;
@@ -2222,6 +2423,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         app.next_verify_ms = SDL_GetTicks() + VERIFY_INTERVAL_MS;
         if (palette_source_changed()) load_palette();
         snapshot_sdl_displays();
+        maybe_self_heal();
+        update_tray();
         start_action(ACTION_REFRESH);
     }
     return SDL_APP_CONTINUE;
@@ -2230,6 +2433,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 void SDL_AppQuit(void *appstate, SDL_AppResult result)
 {
     (void)appstate; (void)result;
+    if (app.tray) SDL_DestroyTray(app.tray);
     if (app.worker) SDL_WaitThread(app.worker, NULL);
     for (int face = 0; face < PGEN_FACE_COUNT; face++)
         if (app.font_texture[face]) SDL_DestroyTexture(app.font_texture[face]);

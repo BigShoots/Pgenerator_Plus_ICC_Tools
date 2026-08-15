@@ -159,13 +159,42 @@ Rather than silently profile a tone-mapped conversion, an HDR run fails. That
 is the same choice the Linux build makes when it cannot get a native HDR
 surface.
 
+## Parity with Windows and KDE
+
+| | Windows | KDE/Linux | macOS |
+|---|---|---|---|
+| Patch display, exact SDR code values | yes | yes | yes |
+| Reads the display's active profile | yes | yes (1.4.2+) | yes |
+| Install & Apply from the WebUI | yes | yes | yes |
+| Result reported back definitively | yes, result file | inferred from the compositor | yes, result file |
+| Tray / menu-bar item | yes | no | yes |
+| Continuous verification | yes | yes | yes |
+| Self-healing reassociation | yes | no | yes |
+| Separate SDR and HDR profile slots | yes | yes | **impossible** — one slot |
+| Application-managed cLUT/matrix correction | yes | yes | **impossible** — see above |
+| Native HDR (PQ) patches | yes, DXGI | yes, Wayland | not yet — see [HDR](#hdr) |
+| Autostart at login | yes | no | not yet |
+| Bundled ArgyllCMS `colprof` for build offload | yes | yes | not yet |
+
+The macOS verification is stricter than either sibling: it compares the ICC
+payload WindowServer is actually rendering with against the file on disk,
+rather than trusting what the profile database recorded. The two can disagree,
+and only the first one means the display is really calibrated.
+
+Self-healing follows the Windows guard rails, which are what keep a self-healer
+from becoming a fight with the user: act only on a second consecutive mismatch,
+at most one reassociation a minute, never reinstall from the timer, and give up
+after three failures with an explanation. macOS additionally re-checks
+immediately on display add, remove, move and orientation change, because those
+are exactly the events after which it drops an assignment.
+
 ## What is not here yet
 
-- Menu-bar item and login-item autostart (the Windows loader has both)
-- Self-healing reassociation after macOS drops a profile on hotplug
+- Login-item autostart (`SMAppService` wants a properly signed, `/Applications`
+  bundle, so this lands with notarisation)
 - A bundled ArgyllCMS `colprof`, so the build-offload path is unused and the Pi
   fits profiles itself. Homebrew's `argyll-cms` is 3.5.0, an exact match for the
-  Pi's, so this is packaging rather than code.
+  Pi's version gate, so this is packaging rather than code.
 - Notarisation
 
 ## Files
