@@ -1646,6 +1646,11 @@ static const char *companion_platform(void)
 {
 #ifdef _WIN32
     return "windows";
+#elif defined(PGEN_MACOS)
+    /* A stock PGenerator+ validates this against (windows|linux) and rejects
+     * the pairing request outright, so --platform-compat lets a macOS build
+     * work against a unit that has not taken the server-side patch. */
+    return pgen_macos_platform_string();
 #else
     return "linux";
 #endif
@@ -2595,7 +2600,7 @@ static uint32_t patch_to_hdr10(double r, double g, double b)
     return 0xc0000000u | (blue << 20) | (green << 10) | red;
 }
 
-#ifndef _WIN32
+#ifdef PGEN_LINUX
 /* What KWin says about the output the patches land on.
  *
  * Two things are only knowable from the compositor. SDL reports HDR through
@@ -2749,6 +2754,12 @@ static bool kwin_safe_connector(const char *connector)
     return true;
 }
 
+#endif /* PGEN_LINUX */
+
+/* Shared: how a finished profile announces that it is an HDR one. Neither
+ * of these touches a compositor - one reads the filename PGenerator+ chose,
+ * the other reads the profile's own cicp tag - so both are needed on macOS
+ * as well, to label a profile the Pi built for Windows or KDE. */
 static bool linux_profile_name_is_hdr(const char *path)
 {
     char upper[1024];
@@ -2768,6 +2779,10 @@ static bool profile_has_hdr_cicp(const unsigned char *profile, size_t profile_le
            tag.data[8] == 9 && tag.data[9] == 16 &&
            tag.data[10] == 0 && tag.data[11] == 1;
 }
+
+/* KWin again below. The two helpers above are plain ICC and filename
+ * inspection, so macOS shares them. */
+#ifdef PGEN_LINUX
 
 /* Keep compositor-managed and application-managed correction mutually
  * exclusive. KWin uses the MHC2 curves as the output calibration when that
@@ -2856,7 +2871,7 @@ static uint32_t kwin_hdr_surface_reference(SDL_DisplayID display)
             output.sdr_brightness, reference);
     return (uint32_t)lround(reference);
 }
-#endif
+#endif /* PGEN_LINUX */
 
 static bool update_renderer_hdr_state(void)
 {
@@ -2898,11 +2913,13 @@ static bool update_renderer_hdr_state(void)
         app.hdr_active = false;
         return false;
     }
+#ifdef PGEN_LINUX
     if (app.hdr && !app.hdr_active) {
         KWinOutputState output;
         if (kwin_output_state(app.selected_display_id, &output) && output.hdr)
             app.hdr_active = true;
     }
+#endif
 #endif
     if (app.hdr) {
         sdr_white_scale = SDL_GetFloatProperty(renderer_props, SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT, 1.0f);
@@ -2962,6 +2979,15 @@ static SDL_Colorspace colorspace_for_hdr(void)
 {
 #ifdef _WIN32
     return SDL_COLORSPACE_SRGB_LINEAR;
+#elif defined(PGEN_MACOS)
+    /* There is no correct answer on macOS today. SDL's Metal renderer accepts
+     * only SDL_COLORSPACE_SRGB and SDL_COLORSPACE_SRGB_LINEAR and fails
+     * renderer creation for anything else, so PQ cannot come through this
+     * path at all; it would need a bespoke CAMetalLayer, the way Windows uses
+     * a bespoke DXGI swapchain. Returning HDR10 here would fail loudly at
+     * creation, which is the correct failure - the Companion must not fall
+     * back to an SDR conversion and profile that instead. */
+    return SDL_COLORSPACE_HDR10;
 #else
     return SDL_COLORSPACE_HDR10;
 #endif
@@ -3382,6 +3408,11 @@ static void raise_pattern_window(void)
         }
     }
 #endif
+#ifdef PGEN_MACOS
+    /* SDL_RaiseWindow can bring the window forward without giving it key
+     * focus, which loses F11 and Escape mid-series. */
+    pgen_macos_activate_window(app.window);
+#endif
 }
 
 static bool apply_display_settings(bool fullscreen, int patch_size)
@@ -3723,6 +3754,60 @@ static void companion_run_install(const char *poll_response)
             remove(result_path);
         }
     }
+#elif defined(PGEN_MACOS)
+    {
+        char loader[1200], display_argument[320], uuid_argument[128];
+        char result_argument[1600], result_path[1500];
+        PgenMacDisplay display_state;
+        pid_t child;
+        (void)profile_is_hdr;   /* macOS has one profile slot; the Loader labels it */
+        if (!companion_tool_path("PGenProfileLoader", loader, sizeof(loader))) {
+            companion_report_install(job, false, "PGenerator+ Profile Loader is not installed beside Patch Companion");
+            return;
+        }
+        /* The display UUID is the macOS counterpart of the Windows monitor
+         * device path: stable across reboots and unambiguous when two
+         * identical panels are attached, which a display name is not. */
+        if (!pgen_macos_display_state(app.selected_display_id, &display_state)) {
+            companion_report_install(job, false, "Could not identify the display showing patches");
+            return;
+        }
+        SDL_snprintf(result_path, sizeof(result_path), "%sinstall-%s.result", directory, job);
+        remove(result_path);
+        SDL_snprintf(display_argument, sizeof(display_argument), "--display=%s", app.selected_display);
+        SDL_snprintf(uuid_argument, sizeof(uuid_argument), "--display-uuid=%s", display_state.uuid);
+        SDL_snprintf(result_argument, sizeof(result_argument), "--result=%s", result_path);
+        child = fork();
+        if (child == 0) {
+            execl(loader, loader, "--apply-from-companion", uuid_argument,
+                  display_argument, result_argument, profile_path, (char *)NULL);
+            _exit(127);
+        }
+        if (child > 0) {
+            SDL_Thread *reaper = SDL_CreateThread(reap_profile_loader,
+                                                  "profile-loader-reaper",
+                                                  (void *)(intptr_t)child);
+            if (reaper) SDL_DetachThread(reaper);
+            /* Windows' result-file contract rather than the Linux
+             * fire-and-forget. On Linux the Companion has to infer the outcome
+             * by asking the compositor what it ended up with; on macOS the
+             * Loader can settle it definitively through ColorSync, so wait for
+             * a real answer instead of inferring one. */
+            for (int attempt = 0; attempt < 480; attempt++) {
+                FILE *result = fopen(result_path, "rb");
+                if (result) {
+                    char text[16] = "";
+                    fread(text, 1, sizeof(text) - 1, result);
+                    fclose(result);
+                    accepted = !strncmp(text, "ok", 2);
+                    break;
+                }
+                SDL_Delay(250);
+            }
+            remove(result_path);
+            if (!reaper) waitpid(child, NULL, WNOHANG);
+        }
+    }
 #else
     {
         char loader[1200], display_argument[256];
@@ -3900,6 +3985,7 @@ static void poll_server(void)
      * display routinely carries an HDR profile with an EMPTY SDR one - reading
      * only iccProfilePath is what made a configured display report "no profile
      * loaded". Also settles HDR when the colour-management protocol did not. */
+#ifdef PGEN_LINUX
     {
         KWinOutputState output;
         if (kwin_output_state(app.selected_display_id, &output)) {
@@ -3918,11 +4004,44 @@ static void poll_server(void)
         }
     }
 #endif
+#ifdef PGEN_MACOS
+    /* The same question, asked of ColorSync. macOS keeps one profile per
+     * display rather than KWin's separate SDR and HDR slots, so there is no
+     * slot to choose between. */
+    {
+        PgenMacDisplay display_state;
+        if (pgen_macos_display_state(app.selected_display_id, &display_state) &&
+            display_state.icc_path[0]) {
+            const char *base = strrchr(display_state.icc_path, '/');
+            SDL_strlcpy(active_profile, base ? base + 1 : display_state.icc_path,
+                        sizeof(active_profile));
+            SDL_strlcpy(app.linux_profile_path, display_state.icc_path,
+                        sizeof(app.linux_profile_path));
+        } else {
+            app.linux_profile_path[0] = '\0';
+        }
+        /* "srgb" would be a lie here. SDL leaves the CAMetalLayer's colorspace
+         * nil, which CAMetalLayer documents as performing no colour matching,
+         * so what reaches the panel is device code values - not sRGB that the
+         * compositor then converts. Report the pipeline that actually ran. */
+        SDL_strlcpy(swapchain_color_space,
+                    app.passthrough_ready ? "device" : "device-unverified",
+                    sizeof(swapchain_color_space));
+    }
+#endif
+#endif
     /* Carry the reason a requested transform is not running, so the server does
      * not have to guess whether a profile is missing or the whole feature is.
      * Both fields belong to this thread: load_correction_lut runs from here. */
     if (!app.correction_ready && app.correction_error[0])
         SDL_strlcpy(transform_note, app.correction_error, sizeof(transform_note));
+#ifdef PGEN_MACOS
+    /* If the patch window turned out to be colour-managed after all, that
+     * matters more than whatever else is in the note: every measurement in the
+     * run would be of a converted signal. */
+    if (!app.passthrough_ready && app.passthrough_note[0])
+        SDL_strlcpy(transform_note, app.passthrough_note, sizeof(transform_note));
+#endif
     profile_name_hex(transform_note, transform_note_hex, sizeof(transform_note_hex));
     profile_name_hex(active_profile, profile_hex, sizeof(profile_hex));
     profile_name_hex(app.selected_display, display_hex, sizeof(display_hex));
@@ -3961,6 +4080,65 @@ static void poll_server(void)
 #ifdef _WIN32
             wcsncpy(app.correction_profile_path,active_profile_path,SDL_arraysize(app.correction_profile_path)-1);
             app.correction_profile_path[SDL_arraysize(app.correction_profile_path)-1]=L'\0';
+#elif defined(PGEN_MACOS)
+            /* Application-managed correction cannot work on macOS, and saying
+             * so is the whole point of this branch.
+             *
+             * The clut and matrix modes apply the active profile's inverse
+             * because the compositor is expected to apply the forward
+             * transform afterwards - that is what makes the pair cancel on
+             * Windows and KWin. macOS does not: the patch window's layer is
+             * untagged, so nothing converts our pixels, and applying the
+             * inverse alone would correct once in the wrong direction and
+             * quietly produce a plausible, wrong profile.
+             *
+             * Refuse instead, the way the Linux build refuses to profile an
+             * SDR conversion when native HDR is unavailable. */
+            if (strcmp(app.correction_mode, "system") &&
+                strcmp(app.correction_mode, "none")) {
+                app.correction_ready = false;
+                SDL_Log("macOS: refusing %s correction. It applies the active "
+                        "profile's inverse expecting the compositor to apply the "
+                        "forward transform, and macOS applies neither, so the "
+                        "patches would be corrected once in the wrong direction.",
+                        app.correction_mode);
+                /* Kept under 128 bytes: that is the wire buffer for
+                 * transform_note, and a note truncated mid-word reads as a
+                 * bug rather than an explanation. */
+                SDL_snprintf(app.correction_error, sizeof(app.correction_error),
+                             "macOS applies no ICC conversion to this window, so "
+                             "%s correction would not cancel out. Use system or none.",
+                             app.correction_mode);
+                app.correction_lut_revision = settings_revision;
+                app.next_poll_ms = SDL_GetTicks() + 500;
+                return;
+            }
+            /* vcgt is loaded into the GPU transfer table after compositing, so
+             * unlike the ICC transform it does reach the patches. It is the one
+             * OS-side correction leaving the layer untagged cannot escape, and
+             * the operator has to know it is in the path. */
+            {
+                char vcgt_profile[256] = "";
+                if (pgen_macos_vcgt_is_active(app.selected_display_id,
+                                              vcgt_profile, sizeof(vcgt_profile))) {
+                    if (!strcmp(app.correction_mode, "none")) {
+                        app.correction_ready = false;
+                        SDL_Log("macOS: refusing 'none'. A non-identity vcgt from "
+                                "%s is loaded in the GPU transfer table, which is "
+                                "applied after compositing and so reaches the "
+                                "patches regardless.", vcgt_profile);
+                        SDL_strlcpy(app.correction_error,
+                                    "A non-identity vcgt is loaded in the GPU table, "
+                                    "which 'none' cannot cancel on macOS",
+                                    sizeof(app.correction_error));
+                        app.correction_lut_revision = settings_revision;
+                        app.next_poll_ms = SDL_GetTicks() + 500;
+                        return;
+                    }
+                    SDL_Log("macOS: vcgt from %s is active in the GPU transfer table",
+                            vcgt_profile);
+                }
+            }
 #else
             {
                 KWinOutputState output;
@@ -4505,6 +4683,11 @@ static bool companion_pair(void)
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
     memset(&app, 0, sizeof(app));
+#ifdef PGEN_MACOS
+    /* Reads --platform-compat and sets the SDL hints that must be in place
+     * before the video subsystem starts. */
+    pgen_macos_early_init(argc, argv);
+#endif
     app.displayed_max_luma = app.command_max_luma = 1000.0;
     app.displayed_min_luma = app.command_min_luma = 0.005;
     app.displayed_max_cll = app.command_max_cll = 1000.0;
@@ -4696,7 +4879,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
         SDL_SetAtomicInt(&state->quit_requested, 1);
         if (state->network_thread) SDL_WaitThread(state->network_thread, NULL);
         if (state->install_thread) SDL_WaitThread(state->install_thread, NULL);
-#ifndef _WIN32
+#ifdef PGEN_LINUX
         kwin_restore_profile_source();
 #endif
         if (state->texture) SDL_DestroyTexture(state->texture);

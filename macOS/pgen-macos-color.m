@@ -1,0 +1,374 @@
+/* PGenerator+ ICC Tools - macOS platform backend.
+ *
+ * Everything Common/pgen-icc-companion.c needs from macOS. The C side calls
+ * only what pgen-macos-color.h declares, so the shared source keeps rebasing
+ * onto upstream with a handful of guard-line changes.
+ *
+ * The Windows backend answers "which profile is the OS applying, and how do I
+ * stop it applying that to my patch window". On macOS only the first half is a
+ * question: CAMetalLayer performs no colour matching while its colorspace is
+ * nil, and SDL leaves it nil for an ordinary SDR window, so patches already
+ * reach the panel as device code values. What is left is reading the profile
+ * accurately, identifying the display stably, and being honest about the one
+ * OS-side stage that does still reach the patches - vcgt in the GPU table.
+ */
+
+#import <Cocoa/Cocoa.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <ColorSync/ColorSync.h>
+
+#include <SDL3/SDL.h>
+#include <string.h>
+
+#include "pgen-macos-color.h"
+
+/* ------------------------------------------------------------------ *
+ * Platform string and early init
+ * ------------------------------------------------------------------ */
+
+static char g_platform[16] = "macos";
+
+void pgen_macos_early_init(int argc, char *argv[])
+{
+    for (int index = 1; index < argc; index++) {
+        const char *value = NULL;
+        if (!strncmp(argv[index], "--platform-compat=", 18))
+            value = argv[index] + 18;
+        else if (!strcmp(argv[index], "--platform-compat") && index + 1 < argc)
+            value = argv[++index];
+        if (!value) continue;
+
+        if (!strcmp(value, "linux") || !strcmp(value, "windows") ||
+            !strcmp(value, "macos")) {
+            snprintf(g_platform, sizeof(g_platform), "%s", value);
+            if (strcmp(value, "macos"))
+                SDL_Log("macOS: reporting platform \"%s\" for compatibility with a "
+                        "PGenerator+ that predates macOS support. The WebUI's "
+                        "wording will describe that platform, not this one.", value);
+        } else {
+            SDL_Log("macOS: ignoring --platform-compat=%s (expected linux, "
+                    "windows or macos)", value);
+        }
+    }
+
+    /* Both hints must be set before the video subsystem starts.
+     *
+     * Spaces-based fullscreen is SDL's default on macOS and is wrong for a
+     * patch generator: it animates into a new Space over about 0.7s, hides the
+     * menu bar asynchronously, and lets Mission Control move the window to
+     * another display mid-series. With Spaces off, SDL resizes to the display
+     * bounds and hides the menu bar synchronously. */
+    SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
+    SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_MENU_VISIBILITY, "0");
+}
+
+const char *pgen_macos_platform_string(void)
+{
+    return g_platform;
+}
+
+/* ------------------------------------------------------------------ *
+ * Display identity
+ * ------------------------------------------------------------------ */
+
+/* SDL exposes no CGDirectDisplayID property, so the mapping is built here.
+ * Both sides use top-left-origin global point coordinates with the main
+ * display at the origin, so matching bounds is exact rather than a heuristic;
+ * the name is only a tiebreak for the pathological identical-geometry case. */
+static CGDirectDisplayID display_id_for_sdl_display(SDL_DisplayID sdl_display)
+{
+    SDL_Rect bounds;
+    CGDirectDisplayID displays[16];
+    uint32_t count = 0;
+
+    if (!sdl_display || !SDL_GetDisplayBounds(sdl_display, &bounds)) return 0;
+    if (CGGetOnlineDisplayList(16, displays, &count) != kCGErrorSuccess) return 0;
+
+    const char *wanted = SDL_GetDisplayName(sdl_display);
+    CGDirectDisplayID fallback = 0;
+
+    for (uint32_t index = 0; index < count; index++) {
+        CGRect frame = CGDisplayBounds(displays[index]);
+        if ((int)frame.origin.x != bounds.x || (int)frame.origin.y != bounds.y ||
+            (int)frame.size.width != bounds.w || (int)frame.size.height != bounds.h)
+            continue;
+        if (!fallback) fallback = displays[index];
+
+        if (wanted) {
+            for (NSScreen *screen in NSScreen.screens) {
+                NSNumber *number = screen.deviceDescription[@"NSScreenNumber"];
+                if (number.unsignedIntValue != displays[index]) continue;
+                if (!strcmp(screen.localizedName.UTF8String, wanted))
+                    return displays[index];
+            }
+        }
+    }
+    return fallback;
+}
+
+/* Authoritative once a window exists: the display the patch is actually on,
+ * which is not necessarily the one that was picked at startup. */
+static CGDirectDisplayID display_id_for_window(struct SDL_Window *window)
+{
+    if (!window) return 0;
+    NSWindow *nswindow = (__bridge NSWindow *)SDL_GetPointerProperty(
+        SDL_GetWindowProperties((SDL_Window *)window),
+        SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    NSNumber *number = nswindow.screen.deviceDescription[@"NSScreenNumber"];
+    return (CGDirectDisplayID)number.unsignedIntValue;
+}
+
+/* ------------------------------------------------------------------ *
+ * The active ColorSync profile
+ * ------------------------------------------------------------------ */
+
+/* Custom assignments win over factory ones, which is the precedence the
+ * Displays pane shows. Returns nil when the display has no registered profile
+ * at all - which happens on panels whose effective profile WindowServer
+ * synthesises, so callers must have a fallback. */
+static NSURL *registered_profile_url(CGDirectDisplayID display)
+{
+    CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display);
+    if (!uuid) return nil;
+    NSDictionary *info = CFBridgingRelease(
+        ColorSyncDeviceCopyDeviceInfo(kColorSyncDisplayDeviceClass, uuid));
+    CFRelease(uuid);
+    if (!info) return nil;
+
+    for (NSString *bucket in @[(__bridge NSString *)kColorSyncCustomProfiles,
+                               (__bridge NSString *)kColorSyncFactoryProfiles]) {
+        NSDictionary *profiles = info[bucket];
+        if (![profiles isKindOfClass:NSDictionary.class] || profiles.count == 0) continue;
+
+        NSString *defaultKey = (__bridge NSString *)kColorSyncDeviceDefaultProfileID;
+        id entry = profiles[profiles[defaultKey] ?: @""];
+        if (!entry) {
+            /* The header notes the default key is optional when there is only
+             * one profile, so take whatever single entry is present. */
+            for (id key in profiles) {
+                if ([key isEqual:defaultKey]) continue;
+                entry = profiles[key];
+                break;
+            }
+        }
+        NSURL *url = nil;
+        if ([entry isKindOfClass:NSDictionary.class])
+            url = entry[(__bridge NSString *)kColorSyncDeviceProfileURL];
+        else if ([entry isKindOfClass:NSURL.class])
+            url = entry;
+        if ([url isKindOfClass:NSURL.class]) return url;
+    }
+    return nil;
+}
+
+bool pgen_macos_display_state(unsigned int sdl_display_id, PgenMacDisplay *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+
+    @autoreleasepool {
+        CGDirectDisplayID display =
+            display_id_for_sdl_display((SDL_DisplayID)sdl_display_id);
+        if (!display) return false;
+        out->display_id = display;
+
+        CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display);
+        if (uuid) {
+            NSString *text = CFBridgingRelease(CFUUIDCreateString(NULL, uuid));
+            snprintf(out->uuid, sizeof(out->uuid), "%s", text.UTF8String);
+            CFRelease(uuid);
+        }
+
+        for (NSScreen *screen in NSScreen.screens) {
+            NSNumber *number = screen.deviceDescription[@"NSScreenNumber"];
+            if (number.unsignedIntValue != display) continue;
+            snprintf(out->name, sizeof(out->name), "%s",
+                     screen.localizedName.UTF8String);
+            out->edr_headroom =
+                screen.maximumExtendedDynamicRangeColorComponentValue;
+            out->edr_potential_headroom =
+                screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
+            break;
+        }
+        /* Headroom above 1.0 means the panel can present EDR content. It is
+         * NOT the same claim as Windows' "the output is in HDR10 PQ mode",
+         * and the Companion must not report it as though it were. */
+        out->hdr = out->edr_potential_headroom > 1.0;
+
+        NSURL *url = registered_profile_url(display);
+        if (url) snprintf(out->icc_path, sizeof(out->icc_path), "%s",
+                          url.path.UTF8String);
+
+        out->valid = true;
+        return true;
+    }
+}
+
+void *pgen_macos_copy_active_profile(unsigned int sdl_display_id, size_t *size)
+{
+    if (size) *size = 0;
+    @autoreleasepool {
+        CGDirectDisplayID display =
+            display_id_for_sdl_display((SDL_DisplayID)sdl_display_id);
+        if (!display) return NULL;
+
+        /* Prefer WindowServer's own view over the device database. On panels
+         * driven in a reference mode the effective profile is synthesised and
+         * has no on-disk URL, while the device database still lists a stale
+         * factory entry - reading the file would characterise the wrong
+         * thing. */
+        CGColorSpaceRef space = CGDisplayCopyColorSpace(display);
+        if (!space) return NULL;
+        CFDataRef icc = CGColorSpaceCopyICCData(space);
+        CGColorSpaceRelease(space);
+        if (!icc) return NULL;
+
+        CFIndex length = CFDataGetLength(icc);
+        void *copy = length > 0 ? malloc((size_t)length) : NULL;
+        if (copy) {
+            memcpy(copy, CFDataGetBytePtr(icc), (size_t)length);
+            if (size) *size = (size_t)length;
+        }
+        CFRelease(icc);
+        return copy;
+    }
+}
+
+void pgen_macos_free(void *data)
+{
+    free(data);
+}
+
+/* ------------------------------------------------------------------ *
+ * vcgt
+ * ------------------------------------------------------------------ */
+
+/* Read the display's current transfer table and decide whether it is doing
+ * anything. Asking CoreGraphics rather than parsing the profile's vcgt tag is
+ * deliberate: what matters is the table actually loaded in the GPU, which is
+ * what reaches the patches, not what some profile on disk asks for. */
+bool pgen_macos_vcgt_is_active(unsigned int sdl_display_id,
+                               char *profile_name, size_t name_size)
+{
+    if (profile_name && name_size) profile_name[0] = '\0';
+
+    @autoreleasepool {
+        CGDirectDisplayID display =
+            display_id_for_sdl_display((SDL_DisplayID)sdl_display_id);
+        if (!display) return false;
+
+        uint32_t capacity = CGDisplayGammaTableCapacity(display);
+        if (capacity == 0 || capacity > 4096) return false;
+
+        CGGammaValue *red = calloc(capacity, sizeof(CGGammaValue));
+        CGGammaValue *green = calloc(capacity, sizeof(CGGammaValue));
+        CGGammaValue *blue = calloc(capacity, sizeof(CGGammaValue));
+        uint32_t count = 0;
+        bool active = false;
+
+        if (red && green && blue &&
+            CGGetDisplayTransferByTable(display, capacity, red, green, blue,
+                                        &count) == kCGErrorSuccess && count > 1) {
+            /* Identity is a straight ramp from 0 to 1. Allow a little slack:
+             * the table is float, and a genuinely neutral profile can still
+             * round a few entries. One part in 2000 is well below anything a
+             * real calibration would produce and well above rounding. */
+            const float tolerance = 1.0f / 2048.0f;
+            for (uint32_t index = 0; index < count && !active; index++) {
+                float expected = (float)index / (float)(count - 1);
+                if (fabsf(red[index] - expected) > tolerance ||
+                    fabsf(green[index] - expected) > tolerance ||
+                    fabsf(blue[index] - expected) > tolerance)
+                    active = true;
+            }
+        }
+        free(red); free(green); free(blue);
+
+        if (active && profile_name && name_size) {
+            NSURL *url = registered_profile_url(display);
+            snprintf(profile_name, name_size, "%s",
+                     url ? url.lastPathComponent.UTF8String : "the active profile");
+        }
+        return active;
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * The patch window
+ * ------------------------------------------------------------------ */
+
+static CAMetalLayer *metal_layer_for_window(struct SDL_Window *window)
+{
+    NSWindow *nswindow = (__bridge NSWindow *)SDL_GetPointerProperty(
+        SDL_GetWindowProperties((SDL_Window *)window),
+        SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    NSView *view = nswindow.contentView;
+    if ([view.layer isKindOfClass:CAMetalLayer.class]) return (CAMetalLayer *)view.layer;
+    for (NSView *child in view.subviews)
+        if ([child.layer isKindOfClass:CAMetalLayer.class]) return (CAMetalLayer *)child.layer;
+    return nil;
+}
+
+bool pgen_macos_check_layer_passthrough(struct SDL_Window *window,
+                                        unsigned int sdl_display_id,
+                                        char *note, size_t note_size)
+{
+    (void)sdl_display_id;
+    if (note && note_size) note[0] = '\0';
+    if (!window) return false;
+
+    @autoreleasepool {
+        CAMetalLayer *layer = metal_layer_for_window(window);
+        if (!layer) {
+            /* Not necessarily broken - a non-Metal renderer would land here -
+             * but it does mean this check cannot vouch for the pipeline. */
+            if (note) snprintf(note, note_size,
+                               "Could not inspect the window's Metal layer, so "
+                               "code-value accuracy is unverified");
+            return false;
+        }
+
+        if (layer.colorspace == NULL) {
+            SDL_Log("macOS: Metal layer is untagged, so no colour matching is "
+                    "applied and patches reach the panel as device values");
+            return true;
+        }
+
+        /* Tagged with something. If it happens to be the display's own space
+         * the match is an identity and the result is the same, so accept that
+         * rather than failing on a technicality. Anything else is a real
+         * conversion the Companion must not paper over. */
+        CGColorSpaceRef display_space =
+            CGDisplayCopyColorSpace(display_id_for_window(window));
+        bool identity = display_space &&
+                        CFEqual(layer.colorspace, display_space);
+        if (display_space) CGColorSpaceRelease(display_space);
+        if (identity) return true;
+
+        CFStringRef name = CGColorSpaceCopyName(layer.colorspace);
+        NSString *label = name ? CFBridgingRelease(name) : @"an unnamed colour space";
+        if (note)
+            snprintf(note, note_size,
+                     "The patch window is tagged %s, so macOS is converting "
+                     "patches before they reach the panel", label.UTF8String);
+        SDL_Log("macOS: %s", note ? note : "layer is colour-managed");
+        return false;
+    }
+}
+
+void pgen_macos_activate_window(struct SDL_Window *window)
+{
+    if (!window) return;
+    @autoreleasepool {
+        NSWindow *nswindow = (__bridge NSWindow *)SDL_GetPointerProperty(
+            SDL_GetWindowProperties((SDL_Window *)window),
+            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+        /* SDL_RaiseWindow alone is unreliable here: without an explicit
+         * application activation the window can come forward without taking
+         * key focus, which loses the F11 and Escape handling mid-series. */
+        if (@available(macOS 14.0, *)) [NSApp activate];
+        else [NSApp activateIgnoringOtherApps:YES];
+        [nswindow makeKeyAndOrderFront:nil];
+    }
+}

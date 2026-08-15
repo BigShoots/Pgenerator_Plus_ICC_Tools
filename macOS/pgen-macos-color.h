@@ -26,6 +26,22 @@ extern "C" {
 
 struct SDL_Window;
 
+/* Called from SDL_AppInit before anything else, to read --platform-compat and
+ * set the SDL hints that have to be in place before the video subsystem comes
+ * up. Safe to call with argc 0. */
+void pgen_macos_early_init(int argc, char *argv[]);
+
+/* What this build reports to PGenerator+ as its platform. Normally "macos".
+ *
+ * A stock unit validates the reported platform against (windows|linux) and
+ * rejects a pairing request outright otherwise, so --platform-compat=linux
+ * lets the Companion work against a unit that has not taken the server-side
+ * patch. "linux" is the better masquerade of the two: the WebUI then labels
+ * the control "compositor profile handling", which is at least conceptually
+ * right for WindowServer, where "windows" would promise MHC2 semantics that
+ * do not exist here. */
+const char *pgen_macos_platform_string(void);
+
 /* What the OS currently reports for one display. The counterpart of
  * windows_active_profile() and kwin_output_state(). */
 typedef struct {

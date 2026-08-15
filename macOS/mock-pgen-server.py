@@ -97,6 +97,7 @@ class State:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     state: State = None          # injected below
+    _last_rejected_token = [""]  # shared, so the warning prints once per token
 
     # Quiet the default one-line-per-request logging; the console is the UI.
     def log_message(self, fmt, *args):
@@ -143,7 +144,78 @@ class Handler(BaseHTTPRequestHandler):
             return self._poll(query)
         if route == "/api/icc/companion/profile-install-data":
             return self._install_data(query)
+        if route.startswith("/mock/"):
+            return self._control(route[len("/mock/"):], query)
         return self._send(404, {"status": "error", "message": "no such route"})
+
+    # -- scriptable control surface ---------------------------------------
+    # The console is for driving this by hand; these routes are the same
+    # commands for a test script, so the verification steps can run unattended.
+    def _control(self, action, query):
+        def number(key, fallback):
+            try:
+                return int((query.get(key) or [fallback])[0])
+            except ValueError:
+                return fallback
+
+        state = self.state
+        if action == "state":
+            with state.lock:
+                return self._send(200, {"client": state.client,
+                                        "acked": state.acked_sequence,
+                                        "last_ack": state.last_ack,
+                                        "paired": state.token is not None,
+                                        "settings": state.settings_fields()})
+        if action == "patch":
+            with state.lock:
+                sequence = state.set_command({
+                    "status": "patch",
+                    "r": number("r", 255), "g": number("g", 255), "b": number("b", 255),
+                    "size": number("size", state.display_size),
+                    "input_max": 255, "code_min": 0, "code_max": 255,
+                    "signal_mode": (query.get("signal_mode") or ["sdr"])[0],
+                    "max_luma": 0, "min_luma": 0, "max_cll": 0, "max_fall": 0,
+                })
+            return self._send(200, {"status": "ok", "sequence": sequence})
+
+        if action == "align":
+            with state.lock:
+                sequence = state.set_command({"status": "align"})
+            return self._send(200, {"status": "ok", "sequence": sequence})
+
+        if action == "settings":
+            with state.lock:
+                for key in ("window_mode", "correction_mode",
+                            "correction_signal_mode"):
+                    if key in query:
+                        setattr(state, key, query[key][0])
+                if "display_size" in query:
+                    state.display_size = number("display_size", state.display_size)
+                state.settings_revision += 1
+                return self._send(200, {"status": "ok",
+                                        "settings": state.settings_fields()})
+
+        if action == "install":
+            path = (query.get("path") or [""])[0]
+            if not os.path.isfile(path):
+                return self._send(404, {"status": "error", "message": "no such file"})
+            with state.lock:
+                state.install = {"job": f"{now_ms()}-{os.getpid()}",
+                                 "file": os.path.basename(path),
+                                 "path": path, "result": None}
+                state.correction_mode = "system"
+                state.settings_revision += 1
+                return self._send(200, {"status": "ok", "job": state.install["job"]})
+
+        if action == "install-status":
+            with state.lock:
+                install = state.install
+            if install is None:
+                return self._send(404, {"status": "error", "message": "no install"})
+            return self._send(200, {"status": install["result"] or "pending",
+                                    "job": install["job"], "file": install["file"]})
+
+        return self._send(404, {"status": "error", "message": f"no such control: {action}"})
 
     def do_POST(self):
         url = urlparse(self.path)
@@ -227,6 +299,15 @@ class Handler(BaseHTTPRequestHandler):
     # -- poll / ack --------------------------------------------------------
     def _poll(self, query):
         if not self._authorized(query):
+            # Worth shouting about. The client retries a rejected token
+            # indefinitely without surfacing anything, so a stale
+            # PGenPatchCompanion.conf looks exactly like a dead server.
+            token = (query.get("token") or [""])[0]
+            if token != self._last_rejected_token[0]:
+                self._last_rejected_token[0] = token
+                print(f"  [poll] REJECTED token {token[:8]}... - this client is "
+                      f"paired with a different server. Delete its "
+                      f"PGenPatchCompanion.conf and restart it.", flush=True)
             return self._send(403, {"status": "unauthorized"})
 
         def one(key):
@@ -527,7 +608,7 @@ def main():
 
     print(f"mock PGenerator+ on http://{args.host}:{args.port}")
     print("start the Companion with "
-          f"--server=http://{args.host}:{args.port}")
+          f"--server=http://{args.host}:{args.port}", flush=True)
 
     if args.no_console:
         try:

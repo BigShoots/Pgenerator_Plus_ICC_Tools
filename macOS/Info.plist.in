@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>              <string>@NAME@</string>
+  <key>CFBundleDisplayName</key>       <string>@NAME@</string>
+  <key>CFBundleExecutable</key>        <string>@EXECUTABLE@</string>
+  <key>CFBundleIdentifier</key>        <string>@IDENTIFIER@</string>
+  <key>CFBundlePackageType</key>       <string>APPL</string>
+
+  <!-- The WebUI compares this with the latest release tag to tell the operator
+       when the Companion is out of date, so it has to track APP_VERSION in
+       Common/pgen-icc-companion.c. The Makefile reads it from there. -->
+  <key>CFBundleShortVersionString</key> <string>@VERSION@</string>
+  <key>CFBundleVersion</key>            <string>1</string>
+
+  <key>CFBundleIconFile</key>          <string>AppIcon</string>
+  <key>LSMinimumSystemVersion</key>    <string>12.0</string>
+  <key>LSApplicationCategoryType</key> <string>public.app-category.graphics-design</string>
+  <key>NSHighResolutionCapable</key>   <true/>
+
+  <!-- Required. macOS 15+ gates outbound LAN connections at the socket layer,
+       so without this the mDNS lookup for pgenerator.local and the connect to
+       the unit fail silently rather than with an error worth reporting. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>PGenerator+ tools connect to your PGenerator+ unit on this network to exchange measurement patches and profiles.</string>
+
+  <!-- Deliberately absent: NSAppTransportSecurity. The protocol is plain HTTP,
+       but ATS governs CFNetwork and NSURLSession, and this client is raw BSD
+       sockets, so an exception here would have no effect either way. -->
+
+  <!-- Keep the patch window on whichever GPU is driving the panel. An
+       automatic switch mid-series would change the output pipeline under the
+       meter. -->
+  <key>NSSupportsAutomaticGraphicsSwitching</key> <false/>
+</dict>
+</plist>
