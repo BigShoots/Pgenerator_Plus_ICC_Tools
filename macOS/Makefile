@@ -156,6 +156,14 @@ bundles: companion loader icon
 	@# the app, and ship the standalone .app too so the Loader can be opened on
 	@# its own and registered as a login item.
 	@cp $(LOADER_BIN) "$(COMPANION_APP)/Contents/Resources/"
+	@# The nested copy is a raw build product and still links SDL3 at the
+	@# Homebrew path, which exists only on the build machine. Repoint it at the
+	@# bundle's own Frameworks - @executable_path for a binary in Resources/
+	@# resolves ../Frameworks correctly - or Install & Apply dies in dyld on
+	@# every other Mac, silently, and the Companion just times out.
+	@install_name_tool -change $(SDL_PREFIX)/lib/libSDL3.0.dylib \
+	   @executable_path/../Frameworks/libSDL3.0.dylib \
+	   "$(COMPANION_APP)/Contents/Resources/$(LOADER_NAME)" 2>/dev/null || true
 	@# Adding a resource invalidates the seal, and --force alone will not
 	@# rebuild it over a stale _CodeSignature - the bundle then fails
 	@# --verify --deep. Drop the old signature first, and do not swallow the
