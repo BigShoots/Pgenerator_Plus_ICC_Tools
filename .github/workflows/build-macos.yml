@@ -105,10 +105,19 @@ jobs:
           chmod +x bundle/PGenPatchCompanion bundle/colprof bundle/profcheck
           (cd bundle && zip -X -r ../PGeneratorPlus-ICC-Tools-macOS-arm64.zip .)
           unzip -l PGeneratorPlus-ICC-Tools-macOS-arm64.zip
+          # The native download format: a compressed disk image of the same
+          # bundle, staged under a folder name so the volume shows one item.
+          mkdir -p dmgroot
+          cp -a bundle "dmgroot/PGenerator+ ICC Tools"
+          hdiutil create -volname "PGenerator+ ICC Tools" -srcfolder dmgroot \
+            -format UDZO -ov PGeneratorPlus-ICC-Tools-macOS-arm64.dmg
+          hdiutil verify PGeneratorPlus-ICC-Tools-macOS-arm64.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PGeneratorPlus-ICC-Tools-macOS-arm64
-          path: PGeneratorPlus-ICC-Tools-macOS-arm64.zip
+          path: |
+            PGeneratorPlus-ICC-Tools-macOS-arm64.zip
+            PGeneratorPlus-ICC-Tools-macOS-arm64.dmg
           if-no-files-found: error
