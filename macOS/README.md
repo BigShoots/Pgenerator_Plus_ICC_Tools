@@ -24,10 +24,16 @@ Needs Command Line Tools and Homebrew. Xcode is not required.
 brew install sdl3 && make -C macOS
 ```
 
-That produces `macOS/dist/PGeneratorPlusPatchCompanion.app` and
-`macOS/dist/PGenProfileLoader.app`. A copy of the Loader binary is nested inside
-the Companion's `Contents/Resources` so **Install & Apply** works wherever the
-apps are dragged.
+That produces both bundles in `~/.cache/pgen-icc-tools-macos/dist/`. A copy of
+the Loader binary is nested inside the Companion's `Contents/Resources` so
+**Install & Apply** works wherever the apps are dragged.
+
+Build output deliberately lives outside the checkout. This repo is in iCloud
+Drive, which stamps `com.apple.FinderInfo` and `com.apple.fileprovider`
+attributes on everything it manages; `codesign` rejects those as "resource
+fork, Finder information, or similar detritus", and `xattr -c` cannot remove
+them because the file provider immediately puts them back. A bundle built in
+place cannot be signed at all.
 
 `make dist` zips both for release. `make clean` removes everything.
 
@@ -60,7 +66,7 @@ nobody spends an hour debugging the wrong label.
 ## Running it
 
 ```bash
-open macOS/dist/PGeneratorPlusPatchCompanion.app
+open ~/.cache/pgen-icc-tools-macos/dist/PGeneratorPlusPatchCompanion.app
 ```
 
 It finds the unit by resolving `pgenerator.local`, shows a six-digit pairing

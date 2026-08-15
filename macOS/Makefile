@@ -19,8 +19,18 @@
 # SDL3 comes from Homebrew for the development loop. Release builds should link
 # it statically (see README) so the bundle carries no dylib and needs no rpath.
 
-BUILD      := build
-DIST       := dist
+# Build outputs live OUTSIDE the checkout, and that is not a preference.
+# This repo sits in iCloud Drive, which stamps com.apple.FinderInfo and
+# com.apple.fileprovider attributes on everything it manages. codesign rejects
+# those as "resource fork, Finder information, or similar detritus", and
+# `xattr -c` cannot remove them - the file provider puts them straight back.
+# A bundle built in place therefore cannot be signed at all.
+#
+# $(HOME)/.cache has no spaces in it, which the relative-path rule above still
+# requires.
+OUT        := $(HOME)/.cache/pgen-icc-tools-macos
+BUILD      := $(OUT)/build
+DIST       := $(OUT)/dist
 
 CC         := clang
 ARCH       := -arch arm64
@@ -111,6 +121,10 @@ define bundle
 	     -e 's|@NAME@|$(3)|g' Info.plist.in > "$(2)/Contents/Info.plist"
 	@if [ -f $(BUILD)/AppIcon.icns ]; then \
 	   cp $(BUILD)/AppIcon.icns "$(2)/Contents/Resources/"; fi
+	@# The checkout lives in iCloud Drive, which stamps extended attributes on
+	@# every file it touches. codesign rejects those outright as "resource
+	@# fork, Finder information, or similar detritus", so clear them first.
+	@xattr -cr "$(2)"
 	@codesign --force --sign - --identifier $(4) "$(2)" 2>/dev/null || \
 	   echo "  (ad-hoc signing failed for $(3))"
 	@echo "  $(2)"
@@ -127,9 +141,18 @@ bundles: companion loader icon
 	@# the app, and ship the standalone .app too so the Loader can be opened on
 	@# its own and registered as a login item.
 	@cp $(LOADER_BIN) "$(COMPANION_APP)/Contents/Resources/"
+	@# Adding a resource invalidates the seal, and --force alone will not
+	@# rebuild it over a stale _CodeSignature - the bundle then fails
+	@# --verify --deep. Drop the old signature first, and do not swallow the
+	@# error: an unsigned bundle is a release problem, not a warning.
+	@rm -rf "$(COMPANION_APP)/Contents/_CodeSignature"
+	@xattr -cr "$(COMPANION_APP)"
 	@codesign --force --sign - --identifier com.pgeneratorplus.patchcompanion \
-	  "$(COMPANION_APP)" 2>/dev/null || true
+	  "$(COMPANION_APP)"
+	@codesign --verify --deep --strict "$(COMPANION_APP)"
 	@echo "  (Profile Loader nested in the Companion for Install & Apply)"
+	@echo ""
+	@echo "built in $(DIST)"
 
 .PHONY: bundle-loader
 bundle-loader:
@@ -138,7 +161,7 @@ bundle-loader:
 dist: bundles
 	@cd $(DIST) && ditto -c -k --keepParent --sequesterRsrc . \
 	  ../PGeneratorPlus-ICC-Tools-macOS-arm64.zip
-	@echo "wrote macOS/PGeneratorPlus-ICC-Tools-macOS-arm64.zip"
+	@echo "wrote $(OUT)/PGeneratorPlus-ICC-Tools-macOS-arm64.zip"
 
 # ---------------------------------------------------------------- dev loop
 
@@ -149,4 +172,4 @@ run: bundles
 	"$(COMPANION_APP)/Contents/MacOS/$(COMPANION_NAME)" --server=http://127.0.0.1:8080
 
 clean:
-	rm -rf $(BUILD) $(DIST)
+	rm -rf $(OUT)
