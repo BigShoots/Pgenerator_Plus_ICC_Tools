@@ -526,6 +526,14 @@ typedef struct {
     bool hdr;
     bool hdr_active;
     float hdr_sdr_white_scale;
+    /* Extended range the display grants, 1.0 meaning none, and a tally of the
+     * patches this run that ask for more than it. Every one of those clips to
+     * the same output, so a run with many of them hands the profiler several
+     * different device values that measured identically - which is unfittable,
+     * and looks like a broken profile rather than a display asked for light it
+     * does not have. Knowable here without a meter. */
+    float hdr_headroom;
+    unsigned hdr_patches, hdr_clipped_patches;
     bool fullscreen;
     bool alignment;
     double displayed_r, displayed_g, displayed_b;
@@ -2954,6 +2962,9 @@ static bool update_renderer_hdr_state(void)
         }
         app.hdr_active = true;
         app.hdr_sdr_white_scale = 1.0f;
+        /* One renderer per run, so this is where the clip tally resets. */
+        app.hdr_headroom = headroom;
+        app.hdr_patches = app.hdr_clipped_patches = 0;
         return SDL_SetRenderColorScale(app.renderer, 1.0f);
     }
 #endif
@@ -3388,9 +3399,16 @@ static bool render_patch(const char *mode, double r, double g, double b)
 #ifdef PGEN_MACOS
         {
             double white = pgen_macos_sdr_white_nits();
+            float peak;
             patch_to_scrgb(r, g, b, white, pixel);
             patch_to_scrgb(background_signal, background_signal, background_signal,
                            white, background);
+            /* A patch asking for more than the display grants clips, and every
+             * clipped patch measures the same. Count them so the run can say so
+             * rather than leaving the profiler to fail on the duplicates. */
+            peak = SDL_max(SDL_max(pixel[0], pixel[1]), pixel[2]);
+            app.hdr_patches++;
+            if (peak > app.hdr_headroom) app.hdr_clipped_patches++;
             if (!SDL_UpdateTexture(app.texture, NULL, pixel, (int)sizeof(pixel)))
                 return false;
             if (!SDL_UpdateTexture(app.background_texture, NULL, background,
@@ -4223,6 +4241,19 @@ static void poll_server(void)
     if (!app.correction_ready && app.correction_error[0])
         SDL_strlcpy(transform_note, app.correction_error, sizeof(transform_note));
 #ifdef PGEN_MACOS
+    /* Patches the display could not deliver. Worth saying even when nothing
+     * else is wrong: the profiler sees several device values that measured
+     * identically and reports a broken profile, when the real answer is that
+     * the run asked for more light than the panel has. */
+    if (app.hdr && app.hdr_clipped_patches)
+        SDL_snprintf(transform_note, sizeof(transform_note),
+                     "%u of %u HDR patches exceed the extended range this "
+                     "display grants (%.2fx SDR white, about %.0f cd/m2) and "
+                     "clip to the same output. Lower the target peak luminance "
+                     "to that figure or below.",
+                     app.hdr_clipped_patches, app.hdr_patches,
+                     (double)app.hdr_headroom,
+                     pgen_macos_sdr_white_nits() * (double)app.hdr_headroom);
     /* If the patch window turned out to be colour-managed after all, that
      * matters more than whatever else is in the note: every measurement in the
      * run would be of a converted signal. */
