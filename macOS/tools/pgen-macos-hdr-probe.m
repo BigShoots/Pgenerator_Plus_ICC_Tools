@@ -157,6 +157,11 @@ int main(int argc, const char *argv[])
         int display_index = 0;
         double hold_nits = -1.0;
         int sdr_rgb[3] = {-1, -1, -1};
+        /* 0 = split screen for a visual read, 1 = our Metal layer alone,
+         * 2 = the sRGB control alone. The solo modes exist so a meter can
+         * measure each configuration at the same physical spot, which turns a
+         * judgement about colour into a chromaticity comparison. */
+        int sdr_layout = 0;
         bool use_metadata = true;
         bool primaries_mode = false;
         double metadata_max = 1000.0, metadata_min = 0.005;
@@ -191,6 +196,16 @@ int main(int argc, const char *argv[])
             else if (!strcmp(argv[index], "--sdr") && index + 1 < argc)
                 sscanf(argv[++index], "%d,%d,%d",
                        &sdr_rgb[0], &sdr_rgb[1], &sdr_rgb[2]);
+            else if (!strcmp(argv[index], "--sdr-ours") && index + 1 < argc) {
+                sdr_layout = 1;
+                sscanf(argv[++index], "%d,%d,%d",
+                       &sdr_rgb[0], &sdr_rgb[1], &sdr_rgb[2]);
+            }
+            else if (!strcmp(argv[index], "--sdr-control") && index + 1 < argc) {
+                sdr_layout = 2;
+                sscanf(argv[++index], "%d,%d,%d",
+                       &sdr_rgb[0], &sdr_rgb[1], &sdr_rgb[2]);
+            }
         }
 
         [NSApplication sharedApplication];
@@ -294,10 +309,16 @@ int main(int argc, const char *argv[])
             CGColorRelease(control);
             CGColorSpaceRelease(srgb);
 
-            CGRect half = view.bounds;
-            half.size.width /= 2.0;
-            layer.frame = half;
-            [view.layer addSublayer:layer];
+            if (sdr_layout == 0) {
+                CGRect half = view.bounds;
+                half.size.width /= 2.0;
+                layer.frame = half;
+                [view.layer addSublayer:layer];
+            } else if (sdr_layout == 1) {
+                layer.frame = view.bounds;      /* our layer, full screen */
+                [view.layer addSublayer:layer];
+            }
+            /* sdr_layout == 2 leaves the control layer alone, full screen. */
         } else {
             view.layer = layer;
         }
@@ -344,17 +365,30 @@ int main(int argc, const char *argv[])
         printf("\n");
         if (sdr_mode) {
             double r = sdr_rgb[0] / 255.0, g = sdr_rgb[1] / 255.0, b = sdr_rgb[2] / 255.0;
-            printf("LEFT  half: our Metal layer, colorspace nil (SDL's configuration)\n");
-            printf("RIGHT half: an ordinary sRGB-tagged layer, which macOS does manage\n");
-            printf("both filled with RGB(%d,%d,%d)\n\n",
-                   sdr_rgb[0], sdr_rgb[1], sdr_rgb[2]);
-            printf("With a permuted profile assigned to THIS display:\n");
-            printf("  halves differ     -> PASS, our pixels are not converted\n");
-            printf("  both look wrong   -> FAIL, our layer is colour-managed too\n");
-            printf("  both look right   -> INVALID, the profile is not in the path\n\n");
-            printf("Press Return to exit.\n");
+            if (sdr_layout == 0) {
+                printf("LEFT  half: our Metal layer, colorspace nil (SDL's configuration)\n");
+                printf("RIGHT half: an ordinary sRGB-tagged layer, which macOS does manage\n");
+            } else if (sdr_layout == 1) {
+                printf("full screen: our Metal layer, colorspace nil\n");
+            } else {
+                printf("full screen: sRGB-tagged control layer\n");
+            }
+            printf("filled with RGB(%d,%d,%d)\n", sdr_rgb[0], sdr_rgb[1], sdr_rgb[2]);
+            if (sdr_layout == 0) {
+                printf("\nWith a permuted profile assigned to THIS display:\n");
+                printf("  halves differ     -> PASS, our pixels are not converted\n");
+                printf("  both look wrong   -> FAIL, our layer is colour-managed too\n");
+                printf("  both look right   -> INVALID, the profile is not in the path\n");
+            }
             for (int frame = 0; frame < 3; frame++) { present(r, g, b); pump(0.2); }
-            getchar();
+            if (dwell > 0.0) {
+                printf("holding for %.0fs\n", dwell);
+                fflush(stdout);
+                pump(dwell);
+            } else {
+                printf("\nPress Return to exit.\n");
+                getchar();
+            }
             return 0;
         }
         if (hold_nits >= 0.0) {
