@@ -13,12 +13,15 @@
 # Red and green primaries are half the xy diagram apart, so the verdict is
 # arithmetic rather than a judgement about whether a red looks wrong enough.
 #
-#   ./run-experiment-1.sh --check              preflight only, changes nothing
-#   ./run-experiment-1.sh <display-id> <index>
-#   ./run-experiment-1.sh 0x00000002 1
+#   ./run-experiment-1.sh --check          preflight only, changes nothing
+#   ./run-experiment-1.sh --aim <id>       show red and read, to place the meter
+#   ./run-experiment-1.sh <display-id>
+#   ./run-experiment-1.sh 0x00000002
 #
-# Both values come from `./pgen-colorsync-probe list`. The id is the 0x... one;
-# the index is its position in that list, counting from 0.
+# The id is the 0x... value from `./pgen-colorsync-probe list`. There is no
+# index: NSScreen.screens and CGGetOnlineDisplayList are ordered independently,
+# so an index taken from one and applied to the other can silently target the
+# wrong panel.
 #
 # Nothing touches the display until the meter has been proven to work, and the
 # display's own profile is restored on exit and on Ctrl-C.
@@ -87,6 +90,37 @@ read_meter() {
 METER_PORT=""
 LAST_METER_OUTPUT=""
 
+# Position the meter with the patch actually up, before committing to a run.
+if [ $# -ge 2 ] && [ "$1" = "--aim" ]; then
+    check_meter || exit 1
+    DISPLAY_ID=$2
+    echo
+    echo "showing red on $DISPLAY_ID for 40s. Move the meter onto that display,"
+    echo "roughly centred, and watch the readings settle."
+    ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" --sdr-ours 255,0,0 \
+        --dwell 40 2>&1 | grep -E "^display|WARNING" &
+    sleep 3
+    for attempt in 1 2 3 4 5; do
+        reading=$(read_meter)
+        if [ -z "$reading" ]; then
+            echo "  no reading. spotread said:" >&2
+            echo "$LAST_METER_OUTPUT" | sed 's/^/    /' >&2
+            break
+        fi
+        set -- $reading
+        echo "  Y $1  x $2  y $3"
+        python3 -c "
+import sys
+x, y = float('$2'), float('$3')
+d = ((x-0.313)**2 + (y-0.329)**2) ** 0.5
+print('    ' + ('ON the red patch' if d > 0.15 and x > 0.45
+      else 'NOT on the patch - this reads neutral' if d < 0.15
+      else 'saturated, but not red'))"
+    done
+    pkill -f pgen-macos-hdr-probe 2>/dev/null
+    exit 0
+fi
+
 if [ $# -ge 1 ] && [ "$1" = "--check" ]; then
     check_meter || exit 1
     echo
@@ -104,24 +138,14 @@ fi
 
 # ---------------------------------------------------------------- arguments
 
-if [ $# -lt 2 ]; then
-    echo "usage: $0 <display-id> <display-index>   e.g. $0 0x00000002 1" >&2
-    echo "       $0 --check                        test the meter only" >&2
-    echo "run ./pgen-colorsync-probe list for both values" >&2
+if [ $# -lt 1 ]; then
+    echo "usage: $0 <display-id>      e.g. $0 0x00000002" >&2
+    echo "       $0 --check           test the meter only" >&2
+    echo "run ./pgen-colorsync-probe list for the id" >&2
     exit 2
 fi
 
 DISPLAY_ID=$1
-DISPLAY_INDEX=$2
-
-# Validate the index here rather than letting the probe reject it into a
-# silenced stderr, which is how "N" got all the way to a meaningless run.
-case "$DISPLAY_INDEX" in
-    ''|*[!0-9]*)
-        echo "'$DISPLAY_INDEX' is not a display index." >&2
-        echo "It is the position in ./pgen-colorsync-probe list, counting from 0." >&2
-        exit 2 ;;
-esac
 
 echo "checking the meter before touching anything..."
 check_meter || exit 1
@@ -147,15 +171,6 @@ if [ -z "$ORIGINAL" ] || [ ! -f "$ORIGINAL" ]; then
 fi
 echo "  $ORIGINAL"
 
-# Check the index is in range before a profile is swapped. --list would exit
-# zero whatever index it was given, so count the displays instead.
-DISPLAY_COUNT=$(./pgen-colorsync-probe list 2>/dev/null \
-                | sed -n 's/^\([0-9][0-9]*\) display(s)/\1/p' | head -1)
-if [ -n "$DISPLAY_COUNT" ] && [ "$DISPLAY_INDEX" -ge "$DISPLAY_COUNT" ]; then
-    echo "display index $DISPLAY_INDEX is out of range: there are $DISPLAY_COUNT" >&2
-    echo "displays, so the index must be 0 to $((DISPLAY_COUNT - 1))." >&2
-    exit 2
-fi
 
 # ---------------------------------------------------------------- restore
 
@@ -173,6 +188,51 @@ trap cleanup EXIT INT TERM
 
 # ---------------------------------------------------------------- run
 
+# Aiming check, with the display's own profile still in place. Our layer is
+# unmanaged, so a red fill must measure as red. If it does not, the meter is
+# not looking at the patch - wrong display, wrong spot, or the window never
+# came up - and no amount of profile swapping will fix that.
+echo "checking the meter is actually on the patch..."
+AIM=$(measure --sdr-ours aim)
+echo "  ${AIM:-(none)}"
+python3 - "${AIM:-}" <<'AIMPY' || exit 1
+import sys
+parts = sys.argv[1].split() if len(sys.argv) > 1 else []
+if len(parts) != 3:
+    print("\n  no reading, so there is nothing to aim. Reason is above.")
+    raise SystemExit(1)
+Y, x, y = (float(v) for v in parts)
+# Distance from a rough D65 white point. A saturated primary is far from it;
+# a desktop, a white window or a dark room is not.
+saturation = ((x - 0.313) ** 2 + (y - 0.329) ** 2) ** 0.5
+print(f"  Y {Y:.1f}  x {x:.4f}  y {y:.4f}   distance from white {saturation:.3f}")
+if saturation < 0.15:
+    print("""
+  STOP - the meter is not seeing the red patch.
+
+  That reading is close to neutral, which is what a desktop or a white window
+  measures. A red patch reads around x 0.64, y 0.33.
+
+  Check, in order:
+    - is the meter physically on the display you named?
+    - did a full-screen red window appear on that display?
+    - is anything covering the meter, or is it reading ambient light?
+
+  Nothing has been changed on your display.""")
+    raise SystemExit(1)
+if x < 0.45:
+    print(f"""
+  STOP - the patch measured saturated but not red (x {x:.3f}).
+
+  With the display's own profile still assigned, our unmanaged layer should
+  reproduce red directly. Something else is already transforming it.
+
+  Nothing has been changed on your display.""")
+    raise SystemExit(1)
+print("  good - that is red. Proceeding.")
+AIMPY
+echo
+
 echo "building the permuted profile (red and green colorants swapped)..."
 python3 make-permuted-profile.py build "$ORIGINAL" "$PERMUTED" >/dev/null || exit 1
 
@@ -185,7 +245,7 @@ sleep 2
 measure() {
     local layout=$1 label=$2 result probe_err
     probe_err=$(mktemp)
-    ./pgen-macos-hdr-probe --display "$DISPLAY_INDEX" "$layout" 255,0,0 \
+    ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" "$layout" 255,0,0 \
         --dwell "$DWELL" >/dev/null 2>"$probe_err" &
     local probe=$!
     sleep 3
@@ -240,9 +300,13 @@ if not ours or not control:
     print("The reason is printed above, immediately after whichever step failed.")
     raise SystemExit(1)
 
-_, ox, oy = ours
-_, cx, cy = control
+oY, ox, oy = ours
+cY, cx, cy = control
 distance = ((ox - cx) ** 2 + (oy - cy) ** 2) ** 0.5
+# How far each reading sits from neutral. Two readings can agree simply because
+# neither of them is the patch, and that is not a FAIL - it is no result.
+ours_saturation = ((ox - 0.313) ** 2 + (oy - 0.329) ** 2) ** 0.5
+control_saturation = ((cx - 0.313) ** 2 + (cy - 0.329) ** 2) ** 0.5
 
 print(f"  our layer      x {ox:.4f}  y {oy:.4f}")
 print(f"  sRGB control   x {cx:.4f}  y {cy:.4f}")
@@ -252,7 +316,15 @@ print()
 # A red primary and a green primary are roughly 0.4-0.6 apart in xy; two
 # readings of the same colour at the same spot agree to a few thousandths.
 # 0.05 sits far outside meter noise and far inside the red/green gap.
-if distance > 0.05:
+if ours_saturation < 0.15 and control_saturation < 0.15:
+    print("VERDICT: INVALID - not a FAIL")
+    print("  Both readings are close to neutral, so the meter was measuring")
+    print("  something that is not the patch - a desktop, a white window, or")
+    print("  ambient light. Note that swapping the red and green colorants is")
+    print("  invisible on neutrals, because a neutral sums all three colorants")
+    print("  either way, so two identical near-white readings are exactly what")
+    print("  measuring the wrong thing looks like.")
+elif distance > 0.05:
     print("VERDICT: PASS")
     print("  The two layers measure as different colours, so macOS converted the")
     print("  control and left our layer alone. Patches reach the panel as the")

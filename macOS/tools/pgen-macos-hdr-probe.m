@@ -135,6 +135,22 @@ static CGDirectDisplayID display_at_index(int wanted, NSScreen **screen_out)
     return (CGDirectDisplayID)number.unsignedIntValue;
 }
 
+/* Selecting by CGDirectDisplayID instead, which is what `list` prints.
+ * NSScreen.screens and CGGetOnlineDisplayList are independently ordered, so an
+ * index taken from one and applied to the other can silently pick the wrong
+ * panel - and a patch shown on the wrong display looks exactly like a patch
+ * the meter cannot see. Returns 0 when the id is not attached. */
+static CGDirectDisplayID display_by_id(CGDirectDisplayID wanted, NSScreen **screen_out)
+{
+    for (NSScreen *screen in NSScreen.screens) {
+        NSNumber *number = screen.deviceDescription[@"NSScreenNumber"];
+        if (number.unsignedIntValue != wanted) continue;
+        if (screen_out) *screen_out = screen;
+        return wanted;
+    }
+    return 0;
+}
+
 static void list_displays(void)
 {
     printf("\ndisplays:\n");
@@ -155,6 +171,7 @@ int main(int argc, const char *argv[])
 {
     @autoreleasepool {
         int display_index = 0;
+        CGDirectDisplayID wanted_id = 0;
         double hold_nits = -1.0;
         int sdr_rgb[3] = {-1, -1, -1};
         /* 0 = split screen for a visual read, 1 = our Metal layer alone,
@@ -185,6 +202,16 @@ int main(int argc, const char *argv[])
                 }
                 display_index = (int)parsed;
             }
+            else if (!strcmp(argv[index], "--display-id") && index + 1 < argc) {
+                const char *value = argv[++index];
+                char *end = NULL;
+                unsigned long parsed = strtoul(value, &end, 0);
+                if (!end || *end || parsed == 0) {
+                    fprintf(stderr, "\n'%s' is not a display id. Run --list.\n\n", value);
+                    return 2;
+                }
+                wanted_id = (CGDirectDisplayID)parsed;
+            }
             else if (!strcmp(argv[index], "--hold") && index + 1 < argc)
                 hold_nits = atof(argv[++index]);
             else if (!strcmp(argv[index], "--no-metadata")) use_metadata = false;
@@ -212,7 +239,17 @@ int main(int argc, const char *argv[])
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
         NSScreen *screen = nil;
-        CGDirectDisplayID display = display_at_index(display_index, &screen);
+        CGDirectDisplayID display;
+        if (wanted_id) {
+            display = display_by_id(wanted_id, &screen);
+            if (!display) {
+                fprintf(stderr, "\nDisplay 0x%08x is not attached. Run --list.\n\n",
+                        wanted_id);
+                return 2;
+            }
+        } else {
+            display = display_at_index(display_index, &screen);
+        }
 
         printf("\ndisplay      [%d] %s (0x%08x)\n", display_index,
                screen.localizedName.UTF8String, display);
@@ -231,9 +268,19 @@ int main(int argc, const char *argv[])
                                            screen:screen];
         window.level = NSScreenSaverWindowLevel;
         window.backgroundColor = NSColor.blackColor;
+        /* A window level alone is not enough when the probe is launched from a
+         * background shell job: the app never becomes active, and the window
+         * can end up behind whatever was already on screen or stranded on the
+         * Space that was current when it opened. A patch the meter cannot see
+         * is indistinguishable from a patch that was never drawn, so make the
+         * window impossible to lose. */
+        window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                    NSWindowCollectionBehaviorStationary |
+                                    NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                    NSWindowCollectionBehaviorIgnoresCycle;
+        window.hidesOnDeactivate = NO;
 
         ProbeView *view = [[ProbeView alloc] initWithFrame:screen.frame];
-        view.wantsLayer = YES;
 
         bool sdr_mode = sdr_rgb[0] >= 0;
 
@@ -323,9 +370,31 @@ int main(int argc, const char *argv[])
             view.layer = layer;
         }
         view.metal = layer;
+        view.wantsLayer = YES;          /* after the layer, not before */
         window.contentView = view;
+
+        {
+            CGFloat scale = screen.backingScaleFactor;
+            view.layer.contentsScale = scale;
+            layer.contentsScale = scale;
+            layer.drawableSize = CGSizeMake(layer.frame.size.width * scale,
+                                            layer.frame.size.height * scale);
+            printf("window       %.0fx%.0f at (%.0f,%.0f)\n",
+                   window.frame.size.width, window.frame.size.height,
+                   window.frame.origin.x, window.frame.origin.y);
+            printf("metal layer  %.0fx%.0f, drawable %.0fx%.0f, scale %.1f\n",
+                   layer.frame.size.width, layer.frame.size.height,
+                   layer.drawableSize.width, layer.drawableSize.height, scale);
+            if (layer.drawableSize.width < 1 || layer.drawableSize.height < 1)
+                printf("WARNING: the Metal layer has no drawable size; nothing "
+                       "can be presented\n");
+        }
         [window makeKeyAndOrderFront:nil];
-        [NSApp activateIgnoringOtherApps:YES];
+        /* orderFrontRegardless is the one that works for a process the user
+         * never launched from the Dock. */
+        [window orderFrontRegardless];
+        if (@available(macOS 14.0, *)) [NSApp activate];
+        else [NSApp activateIgnoringOtherApps:YES];
 
         id<MTLCommandQueue> queue = [layer.device newCommandQueue];
 
@@ -335,7 +404,11 @@ int main(int argc, const char *argv[])
             ^(double r, double g, double b) {
                 @autoreleasepool {
                     id<CAMetalDrawable> drawable = [layer nextDrawable];
-                    if (!drawable) return;
+                    if (!drawable) {
+                        fprintf(stderr, "nextDrawable returned nil - nothing was "
+                                        "presented. The patch is not on screen.\n");
+                        return;
+                    }
                     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
                     pass.colorAttachments[0].texture = drawable.texture;
                     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -353,6 +426,7 @@ int main(int argc, const char *argv[])
 
         void (^pump)(double) = ^(double seconds) {
             NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
+            [window orderFrontRegardless];
             while ([until timeIntervalSinceNow] > 0) {
                 NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                     untilDate:until
