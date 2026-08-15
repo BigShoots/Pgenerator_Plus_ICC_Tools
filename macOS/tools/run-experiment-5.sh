@@ -119,7 +119,8 @@ measure_mode() {
     state=$(curl -s "http://127.0.0.1:$PORT/mock/state" | python3 -c "
 import json,sys
 d=json.load(sys.stdin); c=d.get('client') or {}; a=d.get('last_ack') or {}
-print(c.get('transform',''), c.get('transform_ready'), a.get('status',''), (c.get('transform_note') or '')[:70])" 2>/dev/null)
+note=(a.get('message') or c.get('transform_note') or '').replace('|',' ')
+print(f\"{c.get('transform','')} ready={c.get('transform_ready')} ack={a.get('status','')} {note[:110]}\")" 2>/dev/null)
     echo "$reading|$state"
 }
 
@@ -131,6 +132,11 @@ echo "           [${SYS#*|}]"
 CLUT=$(measure_mode clut)
 echo "  clut   : ${CLUT%%|*}"
 echo "           [${CLUT#*|}]"
+
+echo
+echo "what the Companion said about clut:"
+grep -iE "correction|clut|profile|macOS:" /tmp/pgen-clut-companion.log 2>/dev/null \
+    | tail -4 | sed 's/^/  /'
 
 cleanup
 
@@ -150,6 +156,17 @@ if not clut:
     raise SystemExit(0)
 print(f"  clut    Y {clut[0]:8.3f}  x {clut[1]:.4f}  y {clut[2]:.4f}")
 print()
+# If the two readings are the same to within meter noise, the second patch never
+# reached the screen and both numbers describe the first one. Judging a round
+# trip from that is how this script reported a confident wrong answer once.
+same = (abs(clut[1]-sysr[1])**2 + abs(clut[2]-sysr[2])**2) ** 0.5
+if same < 0.005:
+    print(f"  NO SECOND PATCH. The two readings differ by {same:.4f} in xy, which")
+    print("  is meter noise - the clut patch never appeared and both numbers")
+    print("  describe the system one. Check the ack line above: if it says")
+    print("  ack=error, the Companion rejected the mode and that rejection, not")
+    print("  these numbers, is the result.")
+    raise SystemExit(0)
 # Red primary sits near x 0.64; green near x 0.30, y 0.60. Nothing else is close.
 if clut[1] > 0.5:
     print("  ROUND TRIP CLOSES. clut still measured red, so macOS did apply the")
