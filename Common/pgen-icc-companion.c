@@ -3012,6 +3012,19 @@ static SDL_Texture *create_patch_texture(bool hdr)
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, 1);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, 1);
     if (hdr) {
+#ifdef PGEN_MACOS
+        /* Extended linear, matching both the surface this lands on and what
+         * patch_to_scrgb actually writes: multiples of measured SDR white.
+         *
+         * Tagging this HDR10 is right everywhere the texture holds a PQ code,
+         * and wrong here. It makes SDL run its HDR10-to-scRGB transport
+         * conversion, which PQ decodes contents that are already linear -
+         * measured on an XDR panel as luminance tracking a PQ decode of the
+         * submitted value, rising to a plateau and then collapsing where the
+         * PQ denominator crosses zero near an input of 2.0. */
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
+                              SDL_COLORSPACE_SRGB_LINEAR);
+#else
         SDL_PropertiesID renderer_props = SDL_GetRendererProperties(app.renderer);
         float output_headroom = SDL_GetFloatProperty(
             renderer_props, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.0f);
@@ -3021,6 +3034,7 @@ static SDL_Texture *create_patch_texture(bool hdr)
          * SDL's required HDR10-to-scRGB transport conversion but disables its
          * optional source-to-display tone-mapping pass. */
         SDL_SetFloatProperty(props, SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT, output_headroom);
+#endif
     } else {
         SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER, SDL_COLORSPACE_SRGB_LINEAR);
     }
