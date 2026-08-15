@@ -4173,8 +4173,16 @@ static void poll_server(void)
          * linear, and patches are multiples of measured SDR white. */
         if (app.hdr) {
             double white = pgen_macos_sdr_white_nits();
-            SDL_strlcpy(swapchain_color_space, "scrgb-linear",
-                        sizeof(swapchain_color_space));
+            /* Leave whatever SDL reported above standing. This used to assert
+             * "scrgb-linear" unconditionally, which is a claim about what was
+             * asked for rather than what was built - so a surface that came
+             * back as PQ still reported as extended linear, and the patches
+             * measured through it looked inexplicable instead of wrong for a
+             * knowable reason. Only fill in when SDL had nothing to say. */
+            if (!swapchain_color_space[0] ||
+                !SDL_strcmp(swapchain_color_space, "unknown"))
+                SDL_strlcpy(swapchain_color_space, "hdr-unverified",
+                            sizeof(swapchain_color_space));
             if (white > 0.0) {
                 float headroom = 1.0f;
                 if (app.renderer)
