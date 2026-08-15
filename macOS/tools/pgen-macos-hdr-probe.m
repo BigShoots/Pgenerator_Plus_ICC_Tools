@@ -156,6 +156,7 @@ int main(int argc, const char *argv[])
     @autoreleasepool {
         int display_index = 0;
         double hold_nits = -1.0;
+        int sdr_rgb[3] = {-1, -1, -1};
         bool use_metadata = true;
         bool primaries_mode = false;
         double metadata_max = 1000.0, metadata_min = 0.005;
@@ -178,6 +179,9 @@ int main(int argc, const char *argv[])
             else if (!strcmp(argv[index], "--dwell") && index + 1 < argc)
                 dwell = atof(argv[++index]);
             else if (!strcmp(argv[index], "--primaries")) primaries_mode = true;
+            else if (!strcmp(argv[index], "--sdr") && index + 1 < argc)
+                sscanf(argv[++index], "%d,%d,%d",
+                       &sdr_rgb[0], &sdr_rgb[1], &sdr_rgb[2]);
         }
 
         [NSApplication sharedApplication];
@@ -207,19 +211,41 @@ int main(int argc, const char *argv[])
         ProbeView *view = [[ProbeView alloc] initWithFrame:screen.frame];
         view.wantsLayer = YES;
 
+        bool sdr_mode = sdr_rgb[0] >= 0;
+
         CAMetalLayer *layer = [CAMetalLayer layer];
         layer.device = MTLCreateSystemDefaultDevice();
-        layer.pixelFormat = MTLPixelFormatBGR10A2Unorm;
         layer.framebufferOnly = NO;
         layer.frame = view.bounds;
-        layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
-        layer.wantsExtendedDynamicRangeContent = YES;
+
+        if (sdr_mode) {
+            /* Exactly how SDL configures its layer for an ordinary SDR window:
+             * 8-bit BGRA and colorspace left nil. CAMetalLayer documents nil as
+             * "no colormatching occurs", and this mode is here to confirm that
+             * behaviourally rather than take the header's word for it.
+             *
+             * Assign a permuted display profile first (see
+             * make-permuted-profile.py). If a red fill still looks red, nothing
+             * is converting our pixels and the Companion's whole SDR premise
+             * holds. If it looks green, the premise is wrong and the port needs
+             * rethinking before anything else. */
+            layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+            layer.colorspace = NULL;
+            layer.wantsExtendedDynamicRangeContent = NO;
+        } else {
+            layer.pixelFormat = MTLPixelFormatBGR10A2Unorm;
+            layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
+            layer.wantsExtendedDynamicRangeContent = YES;
+        }
 
         /* CAMetalLayer: "If non-nil, content may be tone mapped to match the
          * current display characteristics. If nil, samples will be rendered
          * without tone mapping." Both are worth measuring - if they differ,
          * that difference IS the tone mapper. */
-        if (use_metadata) {
+        if (sdr_mode) {
+            layer.EDRMetadata = nil;
+            printf("SDR mode: 8-bit BGRA, layer colorspace nil (SDL's configuration)\n");
+        } else if (use_metadata) {
             layer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithMinLuminance:(float)metadata_min
                                                                maxLuminance:(float)metadata_max
                                                          opticalOutputScale:100];
@@ -272,6 +298,16 @@ int main(int argc, const char *argv[])
         };
 
         printf("\n");
+        if (sdr_mode) {
+            double r = sdr_rgb[0] / 255.0, g = sdr_rgb[1] / 255.0, b = sdr_rgb[2] / 255.0;
+            printf("filling with RGB(%d,%d,%d)\n", sdr_rgb[0], sdr_rgb[1], sdr_rgb[2]);
+            printf("If a permuted profile is assigned and this still looks like the\n"
+                   "colour you asked for, macOS is not converting our pixels.\n");
+            printf("Press Return to exit.\n");
+            for (int frame = 0; frame < 3; frame++) { present(r, g, b); pump(0.2); }
+            getchar();
+            return 0;
+        }
         if (hold_nits >= 0.0) {
             double actual = 0.0;
             unsigned code = code_for_nits(hold_nits, &actual);
