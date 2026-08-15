@@ -23,9 +23,12 @@ warning.
 
 ## Current release
 
-Version 1.4.18 is paired with the pgen24 KWin build. The Patch Companion in
+Version 1.4.19 is paired with the pgen25 KWin build. The Patch Companion in
 this release:
 
+- bundles a colprof build that fills B2A tables across worker processes on
+  Linux, cutting local profile fitting time roughly in half on multi-core
+  machines while producing byte-identical profiles;
 - preserves HDR relative-PCS headroom above measured white so B2A input
   shapers can represent a display's highlight rolloff;
 - applies VCGT after the B2A device transform in standard ICC order, while
