@@ -77,6 +77,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* SMPTE ST 2084. Y is absolute luminance normalised to 10000 cd/m2. */
 static double pq_from_nits(double nits)
@@ -556,9 +557,38 @@ int main(int argc, const char *argv[])
             double value = (double)code / 1023.0;
             printf("holding  code %4u  = %8.3f nits  (asked for %.3f)\n",
                    code, actual, hold_nits);
-            printf("measure now, then press Return to exit.\n");
             for (int frame = 0; frame < 3; frame++) { present(value, value, value); pump(0.2); }
-            getchar();
+            report_on_screen();
+            /* Potential headroom says the panel COULD present extended range.
+             * Only the live value says it is doing so now, and that is the
+             * closest macOS gets to Windows' DXGI "the output is in HDR10 PQ".
+             * A reading taken at headroom 1.0 is an SDR reading. */
+            printf("EDR headroom while presenting: %.3f (potential %.3f)\n",
+                   screen.maximumExtendedDynamicRangeColorComponentValue,
+                   screen.maximumPotentialExtendedDynamicRangeColorComponentValue);
+            if (screen.maximumExtendedDynamicRangeColorComponentValue <= 1.0)
+                printf("WARNING: headroom is still 1.0 - this display is NOT "
+                       "presenting extended range, so this is an SDR reading. "
+                       "Enable HDR for the display.\n");
+            fflush(stdout);
+            if (dwell > 0.0) {
+                printf("holding for %.0fs\n", dwell);
+                fflush(stdout);
+                pump(dwell);
+            } else {
+                /* getchar() returns EOF instantly when stdin is not a
+                 * terminal, which is how a backgrounded run used to flash the
+                 * window and vanish. Require a tty, or a dwell. */
+                if (isatty(fileno(stdin))) {
+                    printf("measure now, then press Return to exit.\n");
+                    getchar();
+                } else {
+                    printf("no terminal on stdin and no --dwell given; holding "
+                           "30s so there is something to measure.\n");
+                    fflush(stdout);
+                    pump(30.0);
+                }
+            }
         } else if (primaries_mode) {
             double actual = 0.0;
             unsigned code = code_for_nits(100.0, &actual);
