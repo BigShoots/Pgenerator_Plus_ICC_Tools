@@ -158,3 +158,24 @@ display, asking for red:
   B2A0. A wording tweak ("this profile has no cLUT") might save a user some
   confusion, since the current message reads like a transient state.
 
+
+## 9. The v1.4.19 macOS build may not be able to pair with a current unit
+
+Verified on our side, worth checking on yours: the macOS Companion reports
+`"platform":"macos"` in its pair request (confirmed by running the shipped
+binary against a protocol mock), but `PGICCProfile.pm` on the unit validates
+the platform against `(windows|linux)` in both the pair-request handler (~:386)
+and the poll handler (~:604), and rejects the pairing outright with "Invalid
+pairing request".
+
+As of today the PGenerator-Plus repo's main still has the old regexes, so
+unless a unit-side update ships alongside the macOS tools, users who download
+the DMG will get a pairing failure with no hint why.
+
+The whole fix is widening the two regexes to `(windows|linux|macos)` — we
+carry it as a patch (with optional WebUI wording for a macos case: download
+asset map, OS sniff, the "Compositor profile handling (KWin)" label) and can
+send it over.
+
+We haven't been able to test against a real unit yet, so if your units already
+have this server-side, ignore this section entirely.
