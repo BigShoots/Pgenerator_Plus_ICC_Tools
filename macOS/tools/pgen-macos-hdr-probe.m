@@ -260,12 +260,24 @@ int main(int argc, const char *argv[])
             printf("WARNING: this display reports no EDR headroom. Enable HDR for it,\n"
                    "         or pick another display - results here mean nothing.\n");
 
+        /* initWithContentRect:...screen: interprets the rect RELATIVE to that
+         * screen's origin. Passing screen.frame - which is already in global
+         * coordinates - together with screen: adds the origin twice, so the
+         * window lands at double the intended offset and misses the display
+         * entirely. It is invisible on the main display, whose origin is (0,0),
+         * because doubling zero is still zero.
+         *
+         * Create it with no screen, then place it with global coordinates,
+         * which is unambiguous. */
         NSWindow *window =
-            [[NSWindow alloc] initWithContentRect:screen.frame
+            [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0,
+                                                             screen.frame.size.width,
+                                                             screen.frame.size.height)
                                         styleMask:NSWindowStyleMaskBorderless
                                           backing:NSBackingStoreBuffered
                                             defer:NO
-                                           screen:screen];
+                                           screen:nil];
+        [window setFrame:screen.frame display:NO];
         window.level = NSScreenSaverWindowLevel;
         window.backgroundColor = NSColor.blackColor;
         /* A window level alone is not enough when the probe is launched from a
