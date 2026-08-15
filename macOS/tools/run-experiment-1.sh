@@ -16,6 +16,7 @@
 #   ./run-experiment-1.sh --check          preflight only, changes nothing
 #   ./run-experiment-1.sh --aim <id>       show red and read, to place the meter
 #   ./run-experiment-1.sh --vcgt <id>      separate the ICC and GPU-LUT stages
+#   ./run-experiment-1.sh --noop <id>      assign an IDENTICAL profile, as a control
 #   ./run-experiment-1.sh <display-id>
 #   ./run-experiment-1.sh 0x00000002
 #
@@ -199,6 +200,93 @@ else:
     print(f"  Seeing the display (it responded), but red measured x {rx:.3f}")
     print("  rather than about 0.64. Something is already transforming it.")
 AIMPY
+    exit 0
+fi
+
+# Experiment 1c: the no-op control.
+#
+# Assign a byte-for-byte COPY of the display's own profile. Nothing about the
+# colour description changes at all - only the act of assignment happens.
+#
+# This separates the last two explanations of the residual:
+#   nothing moves  - the shift is genuinely caused by the profile's CONTENT,
+#                    so a display-pipeline transform derived from the profile
+#                    is reaching our layer
+#   things move    - merely assigning any profile perturbs the output, e.g. a
+#                    LUT reload or a recomputed transform, and the content was
+#                    never the variable
+if [ $# -ge 2 ] && [ "$1" = "--noop" ]; then
+    check_meter || exit 1
+    DISPLAY_ID=$2
+
+    ORIGINAL=$(./pgen-colorsync-probe list 2>/dev/null | awk -v id="$DISPLAY_ID" '
+        $1=="display" && $2==id {found=1; next}
+        found && $1=="profile" {
+            line=$0
+            sub(/^[[:space:]]*profile[[:space:]]+/, "", line)
+            sub(/[[:space:]]+\[[a-z]+\][[:space:]]*$/, "", line)
+            print line; exit }')
+    [ -f "$ORIGINAL" ] || { echo "no profile for $DISPLAY_ID" >&2; exit 1; }
+
+    ASSIGNED=""
+    cleanup_noop() {
+        pkill -f pgen-macos-hdr-probe 2>/dev/null
+        [ -n "$ASSIGNED" ] && ./pgen-colorsync-probe restore "$DISPLAY_ID" >/dev/null 2>&1
+        ASSIGNED=""
+    }
+    trap cleanup_noop EXIT INT TERM
+
+    echo
+    echo "with the display's own profile, as assigned now:"
+    RED_BEFORE=$(measure_fill 255,0,0 red-before)
+    echo "  red    ${RED_BEFORE:-(none)}"
+    WHITE_BEFORE=$(measure_fill 255,255,255 white-before)
+    echo "  white  ${WHITE_BEFORE:-(none)}"
+
+    cp "$ORIGINAL" /tmp/pgen-noop.icc
+    if ! cmp -s "$ORIGINAL" /tmp/pgen-noop.icc; then
+        echo "  copy differs from the original - aborting" >&2; exit 1; fi
+    echo "assigning a byte-identical copy (0 bytes differ)..."
+    ./pgen-colorsync-probe assign "$DISPLAY_ID" /tmp/pgen-noop.icc >/dev/null \
+        || { echo "assignment failed" >&2; exit 1; }
+    ASSIGNED=1
+    sleep 2
+
+    echo "with the identical copy assigned:"
+    RED_AFTER=$(measure_fill 255,0,0 red-after)
+    echo "  red    ${RED_AFTER:-(none)}"
+    WHITE_AFTER=$(measure_fill 255,255,255 white-after)
+    echo "  white  ${WHITE_AFTER:-(none)}"
+
+    cleanup_noop
+
+    python3 - "${RED_BEFORE:-}" "${WHITE_BEFORE:-}" "${RED_AFTER:-}" "${WHITE_AFTER:-}" <<'NPY'
+import sys
+def parse(t):
+    p = t.split()
+    return [float(v) for v in p] if len(p) == 3 else None
+rb, wb, ra, wa = (parse(a) for a in sys.argv[1:5])
+print()
+if not all([rb, wb, ra, wa]):
+    print("  incomplete - reasons are above."); raise SystemExit(1)
+def d(a, b): return ((a[1]-b[1])**2 + (a[2]-b[2])**2) ** 0.5
+red_d, white_d = d(rb, ra), d(wb, wa)
+ry, wy = ra[0]/rb[0], wa[0]/wb[0]
+print(f"  red    delta {red_d:.4f}   luminance ratio {ry:.3f}")
+print(f"  white  delta {white_d:.4f}   luminance ratio {wy:.3f}")
+print()
+if red_d < 0.01 and white_d < 0.01 and abs(ry-1) < 0.03 and abs(wy-1) < 0.03:
+    print("  CONTENT IS THE VARIABLE.")
+    print("  Re-assigning an identical profile changed nothing, so the shift")
+    print("  seen with swapped colorants was caused by what the profile says.")
+    print("  A display transform derived from the profile is reaching our")
+    print("  layer, and profiling on macOS has to control for it.")
+else:
+    print("  ASSIGNMENT ITSELF PERTURBS THE OUTPUT.")
+    print("  An identical profile moved the reading, so the profile's content")
+    print("  was never the variable - assigning any profile reloads something.")
+    print("  Every earlier comparison in this experiment is confounded by it.")
+NPY
     exit 0
 fi
 
