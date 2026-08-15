@@ -23,8 +23,14 @@ show a pure red patch.
                               vcgt", and clut/matrix would double-correct.
 
 Usage:
-    make-permuted-profile.py inspect  SOURCE.icc
-    make-permuted-profile.py build    SOURCE.icc OUTPUT.icc
+    make-permuted-profile.py inspect SOURCE.icc
+    make-permuted-profile.py build   SOURCE.icc OUTPUT.icc [--keep-vcgt]
+
+--keep-vcgt leaves the video card gamma table in place. Use it to separate the
+two stages: vcgt is loaded into the GPU and applied after compositing, so it
+reaches an unmanaged layer, whereas the ICC transform does not. With vcgt kept,
+an unmanaged layer should measure the same under this profile as under the
+display's own.
 """
 
 import struct
@@ -62,7 +68,7 @@ def inspect(path):
         print(f"    {name}  type={kind}  offset={offset} size={size}{extra}")
 
 
-def build(source_path, output_path):
+def build(source_path, output_path, keep_vcgt=False):
     data = open(source_path, "rb").read()
     tags = read_tag_table(data)
     names = {signature for signature, _, _ in tags}
@@ -87,6 +93,14 @@ def build(source_path, output_path):
     #   ndin, mmod  Apple's native display information, which lets macOS
     #               reconstruct the real panel behaviour behind our back
     dropped = {b"vcgt", b"vcgp", b"aarg", b"aabg", b"aagg", b"ndin", b"mmod"}
+    if keep_vcgt:
+        # Leaving vcgt and vcgp in place isolates one variable. vcgt is loaded
+        # into the GPU transfer table, which is applied after compositing and
+        # so reaches even a layer macOS does not colour-manage - unlike the ICC
+        # transform. Keeping it means the only thing changing between the
+        # display's own profile and this one is the ICC path, so an unmanaged
+        # layer should measure identically under both.
+        dropped -= {b"vcgt", b"vcgp"}
 
     kept = [(swap.get(signature, signature), offset, size)
             for signature, offset, size in tags
@@ -118,7 +132,8 @@ def build(source_path, output_path):
     open(output_path, "wb").write(bytes(out))
 
     print(f"wrote {output_path}  ({len(out)} bytes, {len(kept)} tags)")
-    print("  red and green colorants swapped, vcgt removed")
+    print("  red and green colorants swapped, vcgt "
+          + ("kept" if keep_vcgt else "removed"))
     print("  a colour-managed red patch will render green through this profile")
 
 
@@ -130,10 +145,11 @@ def main():
     if command == "inspect":
         inspect(sys.argv[2])
     elif command == "build":
-        if len(sys.argv) < 4:
+        args = [a for a in sys.argv[2:] if not a.startswith("--")]
+        if len(args) < 2:
             print("build needs SOURCE and OUTPUT")
             return 2
-        build(sys.argv[2], sys.argv[3])
+        build(args[0], args[1], keep_vcgt="--keep-vcgt" in sys.argv)
     else:
         print(f"unknown command: {command}")
         return 2

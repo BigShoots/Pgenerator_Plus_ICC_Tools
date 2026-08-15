@@ -11,6 +11,7 @@ platform guards; everything macOS-specific lives in this directory.
 | | |
 |---|---|
 | SDR profiling | works, verified end to end against a mock unit |
+| Code-value passthrough | measured and confirmed with a colorimeter |
 | Install & Apply from the WebUI | works |
 | HDR (PQ) profiling | **not supported** — see [HDR](#hdr) |
 | Architecture | Apple Silicon (arm64) |
@@ -105,6 +106,18 @@ Three of these are real limits, not missing work.
 
 ### macOS does not colour-manage the patch window
 
+**Measured and confirmed** on 2026-08-15, with an X-Rite i1 DisplayPro on an
+ASUS VE228. With a display profile whose red and green colorants were swapped
+assigned to that panel, a nominal red measured:
+
+| | x | y |
+|---|---|---|
+| our layer, colorspace nil | 0.5767 | 0.3898 |
+| sRGB-tagged control layer | 0.2893 | 0.6205 |
+
+The control landed on the green primary — macOS converted it. Ours stayed near
+red. 0.369 apart in xy, against a meter noise floor around 0.0001.
+
 `CAMetalLayer` performs no colour matching while its `colorspace` is nil, and
 SDL leaves it nil for an ordinary SDR window. Patches therefore reach the panel
 as device code values with nothing converting them, which is what a pattern
@@ -127,6 +140,14 @@ profile. The Companion refuses them and says why, rather than running them.
 Use `system` or `none`. `none` is additionally refused when a non-identity vcgt
 is loaded, because vcgt is applied after compositing and reaches the patches
 regardless — it is the one OS-side stage an untagged layer cannot escape.
+
+That second claim showed up in the measurement too. Our layer read x 0.6321
+under the panel's own profile and x 0.5767 under the permuted one — a real
+shift, even though the ICC transform demonstrably was not touching it. The
+permuted profile has vcgt stripped, so the GPU transfer table changed between
+the two readings. `run-experiment-1.sh --vcgt <id>` isolates this by swapping
+the colorants while leaving vcgt alone; with the GPU table held constant an
+unmanaged layer should not move at all.
 
 ### One profile slot per display
 

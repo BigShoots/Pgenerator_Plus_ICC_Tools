@@ -15,6 +15,7 @@
 #
 #   ./run-experiment-1.sh --check          preflight only, changes nothing
 #   ./run-experiment-1.sh --aim <id>       show red and read, to place the meter
+#   ./run-experiment-1.sh --vcgt <id>      separate the ICC and GPU-LUT stages
 #   ./run-experiment-1.sh <display-id>
 #   ./run-experiment-1.sh 0x00000002
 #
@@ -198,6 +199,87 @@ else:
     print(f"  Seeing the display (it responded), but red measured x {rx:.3f}")
     print("  rather than about 0.64. Something is already transforming it.")
 AIMPY
+    exit 0
+fi
+
+# Experiment 1b: isolate the two stages.
+#
+# Experiment 1 showed our layer is not colour-managed, but its reading still
+# moved when the permuted profile was assigned - because that profile has vcgt
+# stripped, and vcgt is loaded into the GPU transfer table, which is applied
+# after compositing and so reaches even an unmanaged layer.
+#
+# This keeps vcgt and swaps only the colorants. If our layer now measures the
+# same under both profiles, the ICC transform demonstrably does not touch it
+# and the earlier shift was entirely the GPU table.
+if [ $# -ge 2 ] && [ "$1" = "--vcgt" ]; then
+    check_meter || exit 1
+    DISPLAY_ID=$2
+
+    ORIGINAL=$(./pgen-colorsync-probe list 2>/dev/null | awk -v id="$DISPLAY_ID" '
+        $1=="display" && $2==id {found=1; next}
+        found && $1=="profile" {
+            line=$0
+            sub(/^[[:space:]]*profile[[:space:]]+/, "", line)
+            sub(/[[:space:]]+\[[a-z]+\][[:space:]]*$/, "", line)
+            print line; exit }')
+    [ -f "$ORIGINAL" ] || { echo "no profile for $DISPLAY_ID" >&2; exit 1; }
+
+    ASSIGNED=""
+    cleanup_vcgt() {
+        pkill -f pgen-macos-hdr-probe 2>/dev/null
+        [ -n "$ASSIGNED" ] && ./pgen-colorsync-probe restore "$DISPLAY_ID" >/dev/null 2>&1
+        ASSIGNED=""
+    }
+    trap cleanup_vcgt EXIT INT TERM
+
+    echo
+    echo "measuring our layer with the display's OWN profile..."
+    BEFORE=$(measure_fill 255,0,0 before)
+    echo "  ${BEFORE:-(none)}"
+
+    echo "building a permuted profile that KEEPS vcgt..."
+    python3 make-permuted-profile.py build "$ORIGINAL" /tmp/pgen-permuted-vcgt.icc \
+        --keep-vcgt >/dev/null || exit 1
+    ./pgen-colorsync-probe assign "$DISPLAY_ID" /tmp/pgen-permuted-vcgt.icc >/dev/null \
+        || { echo "assignment failed" >&2; exit 1; }
+    ASSIGNED=1
+    sleep 2
+
+    echo "measuring our layer with colorants swapped but vcgt unchanged..."
+    AFTER=$(measure_fill 255,0,0 after)
+    echo "  ${AFTER:-(none)}"
+
+    cleanup_vcgt
+
+    python3 - "${BEFORE:-}" "${AFTER:-}" <<'VPY'
+import sys
+def parse(t):
+    p = t.split()
+    return [float(v) for v in p] if len(p) == 3 else None
+before, after = parse(sys.argv[1]), parse(sys.argv[2])
+print()
+if not before or not after:
+    print("  no result - reasons are above.")
+    raise SystemExit(1)
+_, bx, by = before
+_, ax, ay = after
+d = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+print(f"  own profile        x {bx:.4f}  y {by:.4f}")
+print(f"  colorants swapped  x {ax:.4f}  y {ay:.4f}")
+print(f"  difference         {d:.4f} in xy")
+print()
+if d < 0.01:
+    print("  CONFIRMED. Swapping the colorants changed nothing, so the ICC")
+    print("  transform does not touch our layer at all. The shift seen in")
+    print("  Experiment 1 was the GPU transfer table, which vcgt-stripping")
+    print("  altered - and which does reach our patches. Both design claims")
+    print("  hold: refuse clut/matrix, and refuse 'none' when vcgt is active.")
+else:
+    print("  UNEXPECTED. With vcgt held constant, swapping the colorants still")
+    print("  moved the reading, so something in the ICC path is reaching our")
+    print("  layer after all. Worth reporting with these numbers.")
+VPY
     exit 0
 fi
 
