@@ -267,10 +267,27 @@ measurement rather than trusting the reported figure.
   meter is already in the loop, so the natural answer is to present scRGB 1.0
   at the start of a run and let PGenerator+ measure it.
 
-  There may be a shortcut: `AppleARMBacklight` publishes
-  `IODisplayParameters.BrightnessMilliNits` in the IORegistry, readable with no
-  privileges. If that tracks measured SDR white across brightness settings, the
-  conversion needs no meter. Untested — built-in panels only.
+  The IORegistry shortcut does not work. `AppleARMBacklight` publishes
+  `IODisplayParameters.BrightnessMilliNits`, but measured against three
+  different SDR whites it tracked neither that nor the panel peak, and reported
+  an identical 381.8 cd/m² on two different Macs. Recorded, not used.
+
+  There may be a better one. Across three brightness settings the reported EDR
+  headroom behaved as `min(16, panel_peak ÷ SDR_white)`:
+
+  | SDR white | headroom | product |
+  |---|---|---|
+  | 37.9 | 16.000 | 607 |
+  | 75.8 | 16.000 | 1213 |
+  | 149.6 | 11.429 | **1710** |
+
+  The first two sit under a hard cap of 16 so reveal nothing; the third is
+  above it, and the product lands on what looks like the panel's peak. If that
+  holds, one measurement of SDR white yields `panel_peak`, and thereafter SDR
+  white is derivable from headroom alone at any brightness where headroom is
+  below 16 — so brightness changes could be tracked without re-measuring. This
+  rests on a single informative data point and needs two or three more
+  brightness settings before it is worth relying on.
 - Refuse, or mark as clipped, any patch whose absolute target exceeds the
   measured full-field ceiling. The ceiling has to be measured; reported
   headroom overstates it badly.

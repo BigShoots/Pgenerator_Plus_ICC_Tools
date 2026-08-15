@@ -185,8 +185,9 @@ if [ $# -ge 3 ] && [ "$1" = "--scrgb" ]; then
     echo "headroom during the sweep: ${HEADROOM:-unknown}"
     if [ -n "$BACKLIGHT" ]; then
         echo "backlight target (IORegistry): $BACKLIGHT cd/m2"
-        echo "  If this tracks the measured 1.0 value across brightness settings,"
-        echo "  the scRGB conversion needs no meter at all."
+        echo "  Recorded only. Measured 2026-08-15 to track neither SDR white"
+        echo "  nor panel peak, and to report the same figure on two different"
+        echo "  Macs - so it is NOT the scRGB conversion factor."
     fi
     echo "wrote $OUT"
     python3 - "$OUT" <<'SPY'
