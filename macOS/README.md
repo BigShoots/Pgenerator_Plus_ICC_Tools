@@ -296,6 +296,45 @@ Reproduce with `macOS/tools/run-experiment-2.sh`: `<id> <label>` for PQ,
 `--scrgb <id> <label>` for extended linear. Both refuse to report numbers
 unless the display is actually granting extended range.
 
+## Monitor-side control (DDC/CI)
+
+Surveyed 2026-08-15 with `macOS/tools/ddc-probe.sh`. **Not usable as a
+dependency on macOS**, though the transport does exist.
+
+DDC/CI reaches a monitor's own controls — RGB gain and black level, contrast,
+picture preset, brightness — which is the half of calibration PGenerator+
+leaves to the operator, and which would let brightness be *pinned* rather than
+merely watched for drift.
+
+| display | connection | reading | verdict |
+|---|---|---|---|
+| Dell U2723QE | USB-C / DP | 65 / 75 / 100 / 100 / 100 | genuinely answers |
+| ASUS VE228 | HDMI→DVI | 82 / 82 / 82 / 82 / 82 | not a reading |
+
+Three findings, in order of how much they matter:
+
+1. **m1ddc returns a plausible number instead of failing.** Brightness,
+   contrast and all three colour gains reporting the *same* value is the
+   signature — no panel ships that way. It appears to be the built-in's
+   brightness percentage answering every query. A single reading cannot be
+   trusted without a cross-check, which makes this a poor foundation.
+2. **HDMI-attached panels are unreachable.** m1ddc addresses USB-C and
+   DisplayPort Alt Mode; its own help excludes the built-in HDMI port on M1 and
+   entry-level M2 Macs. Note this is a macOS transport limitation, not a DVI
+   one — DDC runs over DVI perfectly well.
+3. **No public API exists.** The Apple Silicon route is the private
+   `IOAVService`, which is present in the IORegistry but is the wrong thing for
+   a calibration binary to link.
+
+**The Pi is the right home for this.** It is already connected to the display
+over HDMI, so it already owns that I²C channel, and `ddcutil` there is public
+and supported. Upstream does not do it today — the only related file is
+`usr/lib/scdc_tool.c`, which is HDMI 2.0 scrambling control and unrelated.
+
+Also worth recording: Apple Silicon exposes no raw EDID in the IORegistry, only
+an `EDID UUID` carrying vendor, product and a few header bytes. Panel
+chromaticities and HDR static metadata are therefore not readable without DDC.
+
 ## Parity with Windows and KDE
 
 | | Windows | KDE/Linux | macOS |

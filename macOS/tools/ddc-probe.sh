@@ -81,6 +81,16 @@ for uuid in $UUIDS; do
         *)           printf "    %-10s %s\n" "max lum" "$maximum" ;;
     esac
     [ "$answered" -eq 0 ] && printf "    -> does not answer DDC/CI\n"
+    # A display whose brightness, contrast and all three colour gains report
+    # the SAME number is not reporting its settings. No panel ships that way,
+    # and m1ddc returns a plausible-looking value rather than failing when
+    # nothing answered - so this shape means "no reading", not "82".
+    distinct=$(printf "%s" "$vector" | tr "|" "\n" | grep -v "^-\?$" | sort -u | wc -l | tr -d " ")
+    if [ "$answered" -ge 4 ] && [ "$distinct" -eq 1 ]; then
+        printf "    -> ALL CONTROLS IDENTICAL - this is not a real reading.\n"
+        printf "       Almost certainly the built-in panel's brightness being\n"
+        printf "       returned for every query because nothing answered DDC.\n"
+    fi
     VECTORS="$VECTORS
 $uuid $vector"
 done
@@ -100,6 +110,11 @@ MSG
 else
     echo "control vectors are distinct, so each reading is likely from its own display."
 fi
+
+# Measured 2026-08-15 for the record, so the next person does not repeat it:
+#   Dell U2723QE, USB-C/DP    ->  65 / 75 / 100 / 100 / 100 - plausible and
+#                                 distinct, so that panel genuinely answers
+#   ASUS VE228, HDMI-to-DVI   ->  82 / 82 / 82 / 82 / 82 - not a reading
 
 cat <<'MSG'
 
