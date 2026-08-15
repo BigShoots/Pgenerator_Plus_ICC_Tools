@@ -3000,21 +3000,20 @@ static bool try_create_renderer(bool hdr, const char *driver)
     if (!app.renderer) return false;
     app.hdr = hdr;
 #ifdef PGEN_MACOS
-    /* macOS colour-manages every window, including SDR ones: SDL leaves the
-     * CAMetalLayer tagged sRGB, so WindowServer converts each patch into the
-     * display profile before it reaches the panel. Retag the layer with the
-     * display's own colour space so that match is an identity. This is the
-     * macOS counterpart of the Wayland surface description below - both exist
-     * to stop the compositor reinterpreting patch codes. */
-    if (!pgen_macos_set_layer_passthrough(app.window, app.selected_display_id,
-                                          app.passthrough_note,
-                                          sizeof(app.passthrough_note))) {
-        /* Not fatal: the Companion still runs, but it must not claim
-         * code-value accuracy. poll_server() reports the note verbatim. */
-        app.passthrough_ready = false;
-    } else {
-        app.passthrough_ready = true;
-    }
+    /* The macOS counterpart of the Wayland surface description below, except
+     * that macOS needs nothing arranged: CAMetalLayer performs no colour
+     * matching while its colorspace is nil, and SDL only sets that property
+     * for its scRGB path. Patches therefore reach the panel as device code
+     * values already.
+     *
+     * Verify it anyway on every renderer creation. If a future SDL starts
+     * tagging the layer, the Companion would silently begin measuring a
+     * converted signal, which is exactly the failure the Linux build refuses
+     * to make with HDR. */
+    app.passthrough_ready =
+        pgen_macos_check_layer_passthrough(app.window, app.selected_display_id,
+                                           app.passthrough_note,
+                                           sizeof(app.passthrough_note));
 #endif
 #ifdef PGEN_LINUX
     /* The Vulkan swapchain uses VK_COLOR_SPACE_PASS_THROUGH_EXT on Wayland,

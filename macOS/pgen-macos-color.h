@@ -49,19 +49,36 @@ bool pgen_macos_display_state(unsigned int sdl_display_id, PgenMacDisplay *out);
 void *pgen_macos_copy_active_profile(unsigned int sdl_display_id, size_t *size);
 void pgen_macos_free(void *data);
 
-/* Point the window's CAMetalLayer at the display's own colour space so
- * WindowServer's match becomes an identity and the patch reaches the panel as
- * the code value we asked for. Without this, SDL leaves the layer tagged sRGB
- * and every patch is silently converted into the display profile.
+/* Confirm the patch window is reaching the panel as device code values.
  *
- * `note` receives a short human-readable description of what was actually
- * established, for the Companion's transform_note field. Returns false when
- * passthrough could not be set up, in which case the Companion must report
- * that honestly rather than claim code-value accuracy it does not have.
+ * This started life as a fix and turned out to be a check. CAMetalLayer's
+ * contract is explicit - "the colorspace of the rendered frames. If nil, no
+ * colormatching occurs" - and SDL's Metal renderer only sets that property for
+ * its scRGB path, leaving it nil for an ordinary SDR window. So macOS hands
+ * our pixels to the panel unconverted already, and the job here is to verify
+ * that rather than to arrange it.
+ *
+ * It is still worth checking on every renderer creation. If a future SDL
+ * starts tagging the layer, every patch would silently begin going through a
+ * conversion, and a calibration tool that did not notice would characterise
+ * the wrong thing.
+ *
+ * `note` receives a short description for the Companion's transform_note.
+ * Returns false when the layer is tagged with anything other than the
+ * display's own colour space, which is the case the Companion must report
+ * rather than quietly claim code-value accuracy it no longer has.
  */
-bool pgen_macos_set_layer_passthrough(struct SDL_Window *window,
-                                      unsigned int sdl_display_id,
-                                      char *note, size_t note_size);
+bool pgen_macos_check_layer_passthrough(struct SDL_Window *window,
+                                        unsigned int sdl_display_id,
+                                        char *note, size_t note_size);
+
+/* Whether a non-identity vcgt is loaded in the GPU transfer table for this
+ * display. vcgt is applied after compositing, so unlike the ICC transform it
+ * does reach our patches, and it is the one OS-side correction the Companion
+ * cannot escape by leaving the layer untagged. `profile_name` receives the
+ * profile it came from, for the operator-facing note. */
+bool pgen_macos_vcgt_is_active(unsigned int sdl_display_id,
+                               char *profile_name, size_t name_size);
 
 /* Bring the patch window forward. SDL_RaiseWindow alone is unreliable on
  * macOS without an explicit application activation. */
