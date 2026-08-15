@@ -1,0 +1,112 @@
+Accept and present a macOS Patch Companion.
+
+Applies to BigShoots/PGenerator-Plus (the Pi image), not to this repository.
+Carried here because the change belongs to the other repo and a macOS build is
+useless without it: a stock unit validates the reported platform against
+(windows|linux) and rejects the pairing request outright, so a macOS Companion
+cannot pair at all.
+
+  cd /path/to/PGenerator-Plus
+  git apply /path/to/pgen-server-macos-platform.patch
+
+On a running unit the same two files live at /usr/share/PGenerator/.
+
+Nothing in PGICCProfile.pm branches on platform for behaviour - the three
+occurrences are validation and JSON echo - so widening the two regexes is the
+whole of the server change. The rest is WebUI wording and the download hint.
+
+One choice worth explaining: the WebUI withdraws the clut and matrix
+correction modes for macOS, alongside the existing rule for a pre-1.4.2 Linux
+Companion, but for a different reason. The Linux rule is "this build cannot
+read the active profile". macOS reads it perfectly well; the problem is that
+macOS composites the patch window without an ICC conversion, so applying the
+profile's inverse would have nothing to cancel against. The Companion refuses
+those modes itself; this stops them being offered in the first place.
+
+Until this is applied, a macOS Companion can still be used against the unit by
+starting it with --platform-compat=linux. That pairs and heartbeats correctly
+and costs only some KWin-flavoured wording in the WebUI.
+
+--- a/usr/share/PGenerator/PGICCProfile.pm	2026-08-15 10:14:12
++++ b/usr/share/PGenerator/PGICCProfile.pm	2026-08-15 10:14:12
+@@ -383,7 +383,7 @@
+  return '{"status":"error","message":"Pairing request is empty"}' unless(defined($body) && length($body)>0 && length($body)<4096);
+  my ($client,$platform,$version)=("","","");
+  $client=$1 if($body=~/"client"\s*:\s*"([A-Za-z0-9._-]{1,64})"/);
+- $platform=$1 if($body=~/"platform"\s*:\s*"(windows|linux)"/);
++ $platform=$1 if($body=~/"platform"\s*:\s*"(windows|linux|macos)"/);
+  $version=$1 if($body=~/"version"\s*:\s*"([0-9.]{1,16})"/);
+  return '{"status":"error","message":"Invalid pairing request"}' if($client eq "" || $platform eq "" || $version eq "");
+  $ip="" unless(defined($ip) && $ip=~/^[0-9A-Fa-f:.]{1,45}$/);
+@@ -601,7 +601,7 @@
+  # so the UI needs this to say what is unavailable rather than showing the
+  # missing values as a fault.
+  my $platform=&webui_icc_companion_query_value($query,"platform")||"";
+- $platform="" unless($platform=~/\A(?:windows|linux)\z/);
++ $platform="" unless($platform=~/\A(?:windows|linux|macos)\z/);
+  my $swapchain_cs=&webui_icc_companion_query_value($query,"swapchain_cs")||"unknown";
+  my $presentation=&webui_icc_companion_query_value($query,"presentation")||"unknown";
+  # The Companion's own reason a requested transform is not running.
+--- a/usr/share/PGenerator/icc_profile.js	2026-08-15 10:14:12
++++ b/usr/share/PGenerator/icc_profile.js	2026-08-15 10:14:12
+@@ -1236,8 +1236,16 @@
+  // HDR slot. Conflating the two made the label revert the moment a capable
+  // Linux Companion connected.
+  const isLinux=meterIccCompanionPlatform==='linux';
+- const cannotReadProfile=isLinux&&
+-  (!meterIccCompanionVersion||meterIccVersionBelow(meterIccCompanionVersion,'1.4.2'));
++ const isMac=meterIccCompanionPlatform==='macos';
++ // Two different reasons to withdraw the application-managed modes, and they
++ // are not the same reason. A pre-1.4.2 Linux Companion could not READ the
++ // active profile. A macOS Companion reads it perfectly well, but macOS
++ // composites the patch window without an ICC conversion, so applying the
++ // profile's inverse would have nothing to cancel against and would correct
++ // once in the wrong direction. The Companion refuses those modes; withdraw
++ // them here so they are not offered in the first place.
++ const cannotReadProfile=(isLinux&&
++  (!meterIccCompanionVersion||meterIccVersionBelow(meterIccCompanionVersion,'1.4.2')))||isMac;
+  ['meterCalibrationCompanionCorrectionMode','meterIccCompanionCorrectionMode'].forEach(function(id){
+   const select=document.getElementById(id);
+   if(!select) return;
+@@ -1249,7 +1257,8 @@
+    if(unavailable&&select.value===option.value) reselect=true;
+   });
+   const system=select.querySelector('option[value="system"]');
+-  if(system) system.textContent=isLinux?'Compositor profile handling (KWin)':'Windows profile handling';
++  if(system) system.textContent=isMac?'macOS profile handling (ColorSync)':
++   isLinux?'Compositor profile handling (KWin)':'Windows profile handling';
+   // A stored selection from a Windows session must not survive onto a Linux
+   // Companion as a hidden-but-selected value.
+   if(reselect){
+@@ -1266,7 +1275,8 @@
+ const METER_ICC_GITHUB_RELEASE_ASSETS={
+  'windows-x64':'PGeneratorPlus-ICC-Tools-Windows-x64.exe',
+  'windows-portable-x64':'PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip',
+- 'linux-x64':'PGeneratorPlus-ICC-Tools-Linux-x64.zip'
++ 'linux-x64':'PGeneratorPlus-ICC-Tools-Linux-x64.zip',
++ 'macos-arm64':'PGeneratorPlus-ICC-Tools-macOS-arm64.zip'
+ };
+ 
+ // Which package this visitor most likely wants. A connected Companion is the
+@@ -1276,8 +1286,12 @@
+ function meterIccPreferredDownloadPlatform(){
+  if(meterIccCompanionPlatform==='linux') return 'linux-x64';
+  if(meterIccCompanionPlatform==='windows') return 'windows-x64';
++ if(meterIccCompanionPlatform==='macos') return 'macos-arm64';
+  const hint=String((navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||navigator.userAgent||'');
+  if(/win/i.test(hint)) return 'windows-x64';
++ // Order matters: a Mac user agent contains "Mac OS X", and iOS devices report
++ // "like Mac OS X" too, so exclude the ones that cannot run the tools.
++ if(/mac/i.test(hint)&&!/iphone|ipad|ipod/i.test(hint)) return 'macos-arm64';
+  if(/linux|x11|cros/i.test(hint)&&!/android/i.test(hint)) return 'linux-x64';
+  return '';
+ }
+@@ -1291,7 +1305,7 @@
+  // The release page lists every platform, so rather than choosing for the
+  // visitor, name the file they want. Runs on every status poll because the
+  // answer changes the moment a Companion connects or goes away.
+- const labels={'windows-x64':'the Windows installer','windows-portable-x64':'the Windows portable zip','linux-x64':'the KDE/Linux zip'};
++ const labels={'windows-x64':'the Windows installer','windows-portable-x64':'the Windows portable zip','linux-x64':'the KDE/Linux zip','macos-arm64':'the macOS (Apple Silicon) zip'};
+  const hint=document.getElementById('meterIccReleaseHint');
+  if(hint) hint.textContent=labels[preferred]?('Look for '+labels[preferred]+'.'):'';
+ }
