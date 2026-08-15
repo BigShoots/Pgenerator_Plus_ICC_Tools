@@ -3,10 +3,18 @@
  * Displays measurement patches through the target computer's native output
  * pipeline. Windows uses a native DXGI HDR10 swapchain so PQ/BT.2020 patch
  * codes reach the operating-system HDR pipeline without scRGB remapping.
+ * Linux drives a Wayland PQ/BT.2020 surface for the same reason. macOS has no
+ * PQ surface to offer, so it presents through SDL's Metal EDR path with the
+ * PQ decode done locally - a stable code-to-light mapping rather than an
+ * absolute one.
  */
 
 #ifndef _WIN32
+#ifndef __APPLE__
+/* Darwin headers expose everything by default and hide extensions this file
+ * relies on when a strict POSIX level is requested, so only Linux asks. */
 #define _POSIX_C_SOURCE 200809L
+#endif
 #endif
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
@@ -70,8 +78,16 @@ typedef struct {
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+/* macOS presents HDR through SDL's Metal EDR surface and reads the display's
+ * assigned profile from ColorSync, so neither Wayland nor the generated
+ * color-management protocol glue exists in this build. */
+#include <CoreGraphics/CoreGraphics.h>
+#include <ColorSync/ColorSync.h>
+#else
 #include <wayland-client.h>
 #include "pgen-color-management-v1-client-protocol.h"
+#endif
 #define close_socket close
 typedef int socket_handle_t;
 #define INVALID_SOCKET_HANDLE (-1)
@@ -81,7 +97,7 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 static int reap_profile_loader(void *opaque)
 {
     pid_t child = (pid_t)(intptr_t)opaque;
@@ -99,7 +115,7 @@ static int reap_profile_loader(void *opaque)
 #define RESPONSE_CAPACITY 32768
 #define PGEN_UNUSED __attribute__((unused))
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 typedef struct {
     struct wl_display *display;
     struct wp_color_manager_v1 *manager;
@@ -573,7 +589,7 @@ typedef struct {
 #ifdef _WIN32
     wchar_t windows_monitor_path[256];
 #endif
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
     /* Full path of the profile KWin has assigned to the selected output, as of
      * the last poll. The correction stages read the file from here, the way the
      * Windows build reads the path DXGI hands it. */
@@ -581,6 +597,12 @@ typedef struct {
     char linux_profile_connector[64];
     bool linux_profile_hdr;
     bool linux_forced_profile_passthrough;
+#endif
+#ifdef __APPLE__
+    /* Full path of the profile ColorSync reports for the selected display, as
+     * of the last poll. The correction stages read the file from here, the way
+     * the Linux build reads the KWin assignment. */
+    char macos_profile_path[1024];
 #endif
     double source_r, source_g, source_b;
     double submitted_r, submitted_g, submitted_b;
@@ -1112,7 +1134,7 @@ display_selected:
                     sizeof(app.selected_display));
         app.selected_display_id = target;
         SDL_GetWindowSize(app.window, &width, &height);
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
         /* Wayland ignores most SetWindowPosition calls. The reliable way to
          * land on a chosen output is to recreate the window with
          * SDL_WINDOWPOS_CENTERED_DISPLAY and then enter borderless fullscreen
@@ -1333,6 +1355,8 @@ static bool load_config(CompanionConfig *config, int argc, char *argv[])
         DWORD size = (DWORD)sizeof(config->client);
         if (!GetComputerNameA(config->client, &size)) SDL_strlcpy(config->client, "Windows-PC", sizeof(config->client));
     }
+#elif defined(__APPLE__)
+    if (gethostname(config->client, sizeof(config->client) - 1) != 0) SDL_strlcpy(config->client, "Mac", sizeof(config->client));
 #else
     if (gethostname(config->client, sizeof(config->client) - 1) != 0) SDL_strlcpy(config->client, "Linux-PC", sizeof(config->client));
 #endif
@@ -1606,14 +1630,16 @@ static bool companion_tool_path(const char *name, char *out, size_t out_size)
     return true;
 }
 
-/* Which build this is; only these two are packaged. Reported so the server can
- * describe what is genuinely unavailable instead of showing an empty value as a
- * failure: reading the display's active ICC profile, and the active-profile
- * transforms that depend on it, are Windows-only. */
+/* Which build this is; only these three are packaged. Reported so the server
+ * can describe what is genuinely unavailable instead of showing an empty value
+ * as a failure - installing a finished profile through the Profile Loader, for
+ * example, exists on Windows and Linux but not on macOS. */
 static const char *companion_platform(void)
 {
 #ifdef _WIN32
     return "windows";
+#elif defined(__APPLE__)
+    return "macos";
 #else
     return "linux";
 #endif
@@ -1943,7 +1969,10 @@ static bool apply_mhc2_inverse(double rgb[3])
  * application-side correction modes nothing else loads that table, so the
  * Companion applies it to the transform output here. HDR profiles that need
  * grey-axis tracking beyond what a downstream 1D stage can express must
- * incorporate the calibration into BToA instead of shipping a vcgt tag. */
+ * incorporate the calibration into BToA instead of shipping a vcgt tag.
+ * macOS is the exception and compiles this out: ColorSync loads the active
+ * profile's vcgt into the display pipe itself. */
+#ifndef __APPLE__
 static bool apply_vcgt(double rgb[3])
 {
     IccTag tag=icc_tag(app.correction_profile_data,app.correction_profile_size,"vcgt");
@@ -1970,6 +1999,7 @@ static bool apply_vcgt(double rgb[3])
     }
     return true;
 }
+#endif
 
 static bool apply_local_mhc2(const double input[3], double output[3])
 {
@@ -2022,6 +2052,10 @@ static bool load_correction_lut(uint64_t revision)
         app.correction_ready = false;
 #ifdef _WIN32
         SDL_strlcpy(app.correction_error, "The operating system did not report an active ICC profile for the selected display", sizeof(app.correction_error));
+#elif defined(__APPLE__)
+        SDL_strlcpy(app.correction_error,
+                    "ColorSync did not report a profile for the selected display",
+                    sizeof(app.correction_error));
 #else
         /* Name the compositor and the slot: on Plasma 6.7 an HDR display has a
          * separate "HDR ICC profile" assignment, and a display with only the
@@ -2034,6 +2068,19 @@ static bool load_correction_lut(uint64_t revision)
     }
 #ifdef _WIN32
     file=_wfopen(app.correction_profile_path,L"rb");
+#elif defined(__APPLE__)
+    /* Same file, a third way of finding it: ColorSync names it here. A factory
+     * profile generated in memory has no file behind it, which leaves the path
+     * empty and the explicit correction modes unavailable. */
+    if (!app.macos_profile_path[0]) {
+        if(system_mode){app.correction_lut_revision=revision;app.correction_error[0]='\0';return true;}
+        app.correction_ready = false;
+        SDL_strlcpy(app.correction_error,
+                    "The display's ColorSync profile has no readable file",
+                    sizeof(app.correction_error));
+        return false;
+    }
+    file=fopen(app.macos_profile_path,"rb");
 #else
     /* Same file, different way of finding it: DXGI names it on Windows, KWin
      * names it here. Everything after the open is identical, so the profile
@@ -2084,6 +2131,11 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
          * DWM applies the active profile's MHC2 stage in both window modes, so
          * system handling must submit the source unchanged. Applying MHC2
          * locally here corrects fullscreen patches twice. */
+#elif defined(__APPLE__)
+        /* macOS composites every window through the display's assigned
+         * ColorSync profile on its own, and this build never toggles that OS
+         * state. "system" means exactly that native handling, so the patch
+         * passes through unchanged for the meter to measure it. */
 #else
         /* KWin composites the assigned profile itself, including in HDR from
          * Plasma 6.7 on, so there is nothing here to stand in for - applying
@@ -2124,9 +2176,16 @@ static bool apply_correction_lut(double *red, double *green, double *blue)
                 output[channel]=weight*direct[channel]+(1.0-weight)*output[channel];
         }
     }
+#ifndef __APPLE__
     /* Standard ICC order: vcgt runs on the transform's device output, exactly
      * where a video-card gamma table would. */
     apply_vcgt(output);
+#else
+    /* macOS loads the active profile's vcgt into the video-card gamma table
+     * itself, and this build leaves that OS state alone, so the calibration
+     * already runs after this transform - applying the tag here as well would
+     * run it twice. */
+#endif
     {
 #ifdef _WIN32
         /* DWM will apply MHC2 after either borderless or windowed presentation.
@@ -2552,6 +2611,51 @@ static void patch_to_sdr_linear(double r, double g, double b, float output[4])
     output[3] = 1.0f;
 }
 
+#ifdef __APPLE__
+/* Convert HDR10 patch codes to the linear values SDL's Metal EDR surface
+ * expects, where 1.0 is the display's current SDR white.
+ *
+ * macOS never exposes the physical luminance of SDR white -
+ * SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT is the SDR white VALUE in the linear
+ * colorspace, defined as 1.0 on Apple EDR surfaces - so absolute PQ placement
+ * is not achievable here and the mapping assumes the common 100 cd/m2
+ * reference for SDR white. That is sufficient for characterization: the meter
+ * reads the absolute light, and what matters is that the code-to-light
+ * mapping is deterministic and repeatable at a fixed brightness setting.
+ * Channel values are handed over per channel, so the surface's extended-sRGB
+ * primaries stand in for BT.2020 - stable, but a BT.2020 saturation target
+ * lands at the sRGB chromaticity.
+ *
+ * Values beyond the display's EDR headroom would otherwise be clipped per
+ * channel by the OS; when the largest channel exceeds it, all three are
+ * scaled by one common factor so the channel ratios survive. */
+#define PGEN_MACOS_ASSUMED_SDR_WHITE_NITS 100.0
+static void patch_to_edr_linear(double r, double g, double b, float output[4])
+{
+    SDL_PropertiesID window_props = SDL_GetWindowProperties(app.window);
+    float sdr_white = SDL_GetFloatProperty(
+        window_props, SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT, 1.0f);
+    float headroom = SDL_GetFloatProperty(
+        window_props, SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 0.0f);
+    double linear[3], peak;
+    if (!isfinite((double)sdr_white) || sdr_white <= 0.0f) sdr_white = 1.0f;
+    linear[0] = pq_to_nits(r) / PGEN_MACOS_ASSUMED_SDR_WHITE_NITS * (double)sdr_white;
+    linear[1] = pq_to_nits(g) / PGEN_MACOS_ASSUMED_SDR_WHITE_NITS * (double)sdr_white;
+    linear[2] = pq_to_nits(b) / PGEN_MACOS_ASSUMED_SDR_WHITE_NITS * (double)sdr_white;
+    peak = fmax(linear[0], fmax(linear[1], linear[2]));
+    if (isfinite((double)headroom) && headroom > 1.0f &&
+        peak > (double)headroom * (double)sdr_white) {
+        double scale = (double)headroom * (double)sdr_white / peak;
+        linear[0] *= scale;
+        linear[1] *= scale;
+        linear[2] *= scale;
+    }
+    output[0] = (float)linear[0];
+    output[1] = (float)linear[1];
+    output[2] = (float)linear[2];
+    output[3] = 1.0f;
+}
+#else
 static uint32_t patch_to_hdr10(double r, double g, double b)
 {
     uint32_t red = (uint32_t)lround(fmax(0.0, fmin(1.0, r)) * 1023.0);
@@ -2562,8 +2666,9 @@ static uint32_t patch_to_hdr10(double r, double g, double b)
      * 8-bit conversion texture for the unsupported ARGB2101010 format. */
     return 0xc0000000u | (blue << 20) | (green << 10) | red;
 }
+#endif
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 /* What KWin says about the output the patches land on.
  *
  * Two things are only knowable from the compositor. SDL reports HDR through
@@ -2826,6 +2931,61 @@ static uint32_t kwin_hdr_surface_reference(SDL_DisplayID display)
 }
 #endif
 
+#ifdef __APPLE__
+/* What ColorSync says about the display the patches land on.
+ *
+ * SDL does not expose the CGDirectDisplayID behind one of its displays, so the
+ * SDL bounds rectangle is matched against CoreGraphics' global display bounds;
+ * both are top-left-origin desktop coordinates. macOS keeps one profile
+ * assignment per display - there is no separate SDR/HDR slot to choose
+ * between the way Plasma 6.7 has. */
+static CGDirectDisplayID macos_direct_display_id(SDL_DisplayID display)
+{
+    SDL_Rect bounds;
+    CGDirectDisplayID matched[16];
+    uint32_t count = 0;
+    if (!display || !SDL_GetDisplayBounds(display, &bounds)) return 0;
+    if (CGGetDisplaysWithRect(CGRectMake(bounds.x, bounds.y, bounds.w, bounds.h),
+                              (uint32_t)SDL_arraysize(matched), matched,
+                              &count) != kCGErrorSuccess || count < 1) return 0;
+    return matched[0];
+}
+
+static bool macos_active_profile(SDL_DisplayID display, char *output,
+                                 size_t output_size, char *profile_path,
+                                 size_t profile_path_size)
+{
+    CGDirectDisplayID display_id = macos_direct_display_id(display);
+    ColorSyncProfileRef profile;
+    CFURLRef url;
+    output[0] = '\0';
+    profile_path[0] = '\0';
+    if (!display_id) return false;
+    profile = ColorSyncProfileCreateWithDisplayID(display_id);
+    if (!profile) return false;
+    url = ColorSyncProfileGetURL(profile, NULL);
+    if (url && CFURLGetFileSystemRepresentation(url, true, (UInt8 *)profile_path,
+                                                (CFIndex)profile_path_size)) {
+        const char *base = strrchr(profile_path, '/');
+        SDL_strlcpy(output, base ? base + 1 : profile_path, output_size);
+    } else {
+        /* A factory profile can be generated in memory with no file behind
+         * it. Report its description so the status stays meaningful; the
+         * empty path makes the explicit correction modes report not-ready
+         * instead of evaluating the wrong file. */
+        CFStringRef description = ColorSyncProfileCopyDescriptionString(profile);
+        profile_path[0] = '\0';
+        if (description) {
+            if (!CFStringGetCString(description, output, (CFIndex)output_size,
+                                    kCFStringEncodingUTF8)) output[0] = '\0';
+            CFRelease(description);
+        }
+    }
+    CFRelease(profile);
+    return output[0] != '\0';
+}
+#endif
+
 static bool update_renderer_hdr_state(void)
 {
     SDL_PropertiesID renderer_props;
@@ -2853,6 +3013,26 @@ static bool update_renderer_hdr_state(void)
      * output description reflects the actual monitor pipeline in that case. */
     if (app.hdr && !app.hdr_active && windows_window_hdr_enabled(app.window))
         app.hdr_active = true;
+#elif defined(__APPLE__)
+    /* Metal EDR keeps presenting through the same linear surface in both
+     * modes, so unlike the other platforms there is no PQ output colorspace
+     * to double-check - only that the linear surface was actually granted. */
+    if (app.hdr && output_colorspace != SDL_COLORSPACE_SRGB_LINEAR) {
+        SDL_SetError("Renderer %s returned colorspace 0x%08x instead of linear EDR",
+                     app.renderer_name[0] ? app.renderer_name : "unknown",
+                     (unsigned int)output_colorspace);
+        app.hdr_active = false;
+        return false;
+    }
+    if (app.hdr && !app.hdr_active) {
+        /* Same gap as the other platforms: SDL derives its flag from the
+         * display's EDR headroom and can lag a brightness or reference-mode
+         * change, so the window's current headroom settles it. */
+        float headroom = SDL_GetFloatProperty(
+            SDL_GetWindowProperties(app.window),
+            SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 0.0f);
+        if (isfinite((double)headroom) && headroom > 1.0f) app.hdr_active = true;
+    }
 #else
     /* Same gap, other compositor. KWin does not always report HDR back to a
      * client through the colour-management protocol, so SDL's flag can stay
@@ -2899,12 +3079,25 @@ static SDL_Texture *create_patch_texture(bool hdr)
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_Texture *texture;
     if (!props) return NULL;
+#ifdef __APPLE__
+    /* Both modes stream float pixels here: HDR patches arrive at the texture
+     * already decoded to linear EDR values, so the packed HDR10 layout is
+     * never used and the linear values pass to the linear surface untouched.
+     * The texture headroom is left undeclared so SDL never adds its optional
+     * tone-mapping pass on top. */
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                          SDL_PIXELFORMAT_RGBA128_FLOAT);
+#else
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
                           hdr ? SDL_PIXELFORMAT_ABGR2101010 : SDL_PIXELFORMAT_RGBA128_FLOAT);
+#endif
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STREAMING);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, 1);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, 1);
     if (hdr) {
+#ifdef __APPLE__
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER, SDL_COLORSPACE_SRGB_LINEAR);
+#else
         SDL_PropertiesID renderer_props = SDL_GetRendererProperties(app.renderer);
         float output_headroom = SDL_GetFloatProperty(
             renderer_props, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.0f);
@@ -2914,6 +3107,7 @@ static SDL_Texture *create_patch_texture(bool hdr)
          * SDL's required HDR10-to-scRGB transport conversion but disables its
          * optional source-to-display tone-mapping pass. */
         SDL_SetFloatProperty(props, SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT, output_headroom);
+#endif
     } else {
         SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER, SDL_COLORSPACE_SRGB_LINEAR);
     }
@@ -2929,6 +3123,10 @@ static SDL_Texture *create_patch_texture(bool hdr)
 static SDL_Colorspace colorspace_for_hdr(void)
 {
 #ifdef _WIN32
+    return SDL_COLORSPACE_SRGB_LINEAR;
+#elif defined(__APPLE__)
+    /* Metal's EDR path is a linear extended-range surface; the PQ decode to
+     * linear light happens in patch_to_edr_linear before upload. */
     return SDL_COLORSPACE_SRGB_LINEAR;
 #else
     return SDL_COLORSPACE_HDR10;
@@ -2967,7 +3165,7 @@ static bool try_create_renderer(bool hdr, const char *driver)
     SDL_DestroyProperties(props);
     if (!app.renderer) return false;
     app.hdr = hdr;
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
     /* The Vulkan swapchain uses VK_COLOR_SPACE_PASS_THROUGH_EXT on Wayland,
      * leaving this application as the sole owner of the surface description.
      * Attach BT.2020/PQ before the first frame reaches KWin. */
@@ -3013,12 +3211,23 @@ static bool try_create_renderer(bool hdr, const char *driver)
             SDL_Delay(20);
         } while (SDL_GetTicks() < hdr_deadline);
         if (!app.hdr_active) {
+#ifdef __APPLE__
+            /* On Apple displays the EDR headroom shrinks as the SDR
+             * brightness rises; at full brightness there is none left. */
+            SDL_SetError(
+                "The renderer did not enter HDR after its first presented frame "
+                "(driver=%s). macOS reports no EDR headroom for this display: "
+                "lower the display brightness or select a High Dynamic Range "
+                "preset in System Settings > Displays, then try again.",
+                app.renderer_name[0] ? app.renderer_name : (driver ? driver : "default"));
+#else
             SDL_SetError(
                 "The scRGB renderer did not enter HDR after its first presented frame "
                 "(driver=%s). On Linux install a working Vulkan stack "
                 "(vulkan-loader + mesa-vulkan-drivers or the vendor Vulkan package) "
                 "and enable HDR for this display in Plasma.",
                 app.renderer_name[0] ? app.renderer_name : (driver ? driver : "default"));
+#endif
             destroy_renderer();
             return false;
         }
@@ -3041,9 +3250,15 @@ static bool try_create_renderer(bool hdr, const char *driver)
 static bool create_renderer(bool hdr)
 {
 #ifndef _WIN32
+#ifdef __APPLE__
+    /* Metal is the only SDL backend that presents EDR on macOS. NULL stays
+     * last so a stack without it still gets SDL's default attempt. */
+    const char *hdr_drivers[] = { "metal", NULL };
+#else
     /* Prefer Vulkan (the path proven on Kubuntu/KDE Wayland). Then SDL's GPU
      * backend, then the platform default. NULL must stay last. */
     const char *hdr_drivers[] = { "vulkan", "gpu", NULL };
+#endif
     size_t index;
     char attempt_error[256];
 #endif
@@ -3055,9 +3270,12 @@ static bool create_renderer(bool hdr)
     if (windows_create_hdr_output()) return true;
     SDL_strlcpy(last_error, SDL_GetError(), sizeof(last_error));
 #else
+#ifndef __APPLE__
     /* KWin only exposes an HDR-capable surface for some clients after the
      * window is fullscreen on an HDR output. Attempt that before creating the
-     * scRGB renderer so SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN can become true. */
+     * scRGB renderer so SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN can become true.
+     * Metal EDR has no such precondition, so macOS skips the forced
+     * fullscreen and leaves window mode to the WebUI setting. */
     {
         SDL_WindowFlags flags = SDL_GetWindowFlags(app.window);
         if ((flags & SDL_WINDOW_FULLSCREEN) == 0) {
@@ -3072,6 +3290,7 @@ static bool create_renderer(bool hdr)
         SDL_ShowWindow(app.window);
         SDL_RaiseWindow(app.window);
     }
+#endif
     for (index = 0; index < SDL_arraysize(hdr_drivers); index++) {
         const char *driver = hdr_drivers[index];
         char attempt_summary[320];
@@ -3161,7 +3380,9 @@ static bool render_alignment(void)
 static bool render_patch(const char *mode, double r, double g, double b)
 {
     float pixel[4], background[4];
+#ifndef __APPLE__
     uint32_t hdr_pixel, hdr_background;
+#endif
     SDL_FRect destination;
     int width, height, patch_size, window_percent;
     double background_signal = 0.0;
@@ -3206,12 +3427,22 @@ static bool render_patch(const char *mode, double r, double g, double b)
             return true;
         }
 #endif
+#ifdef __APPLE__
+        /* The Metal EDR surface is linear, not PQ, so the PQ codes are decoded
+         * to light here rather than preserved; see patch_to_edr_linear for the
+         * mapping and its assumptions. */
+        patch_to_edr_linear(r, g, b, pixel);
+        patch_to_edr_linear(background_signal, background_signal, background_signal, background);
+        if (!SDL_UpdateTexture(app.texture, NULL, pixel, (int)sizeof(pixel))) return false;
+        if (!SDL_UpdateTexture(app.background_texture, NULL, background, (int)sizeof(background))) return false;
+#else
         /* PGenerator+ sends normalized HDR10 code values. Preserve them as
          * native 10-bit PQ/BT.2020 pixels without local PQ or roll-off math. */
         hdr_pixel = patch_to_hdr10(r, g, b);
         hdr_background = patch_to_hdr10(background_signal, background_signal, background_signal);
         if (!SDL_UpdateTexture(app.texture, NULL, &hdr_pixel, (int)sizeof(hdr_pixel))) return false;
         if (!SDL_UpdateTexture(app.background_texture, NULL, &hdr_background, (int)sizeof(hdr_background))) return false;
+#endif
     } else {
         patch_to_sdr_linear(r, g, b, pixel);
         patch_to_sdr_linear(background_signal, background_signal, background_signal, background);
@@ -3587,6 +3818,15 @@ static void companion_report_install(const char *job, bool ok, const char *messa
 
 static void companion_run_install(const char *poll_response)
 {
+#ifdef __APPLE__
+    /* No Profile Loader ships for macOS, so the install-and-apply feature
+     * does not exist in this build. Refuse the job immediately with the
+     * reason, so the WebUI shows it instead of waiting out its timeout. */
+    char job[96] = "";
+    if (json_string(poll_response, "install_job", job, sizeof(job)) && job[0])
+        companion_report_install(job, false,
+                                 "Installing display profiles is not supported on macOS");
+#else
     char job[96] = "", file[256] = "", request[768], directory[1200], profile_path[1500];
     unsigned char *profile = NULL;
     size_t profile_length = 0;
@@ -3716,6 +3956,7 @@ static void companion_run_install(const char *poll_response)
     companion_report_install(job, accepted,
                              accepted ? "Profile Loader installed and applied the profile to the selected display"
                                       : "Profile Loader could not verify the profile on the selected display");
+#endif
 }
 
 static int SDLCALL companion_install_thread_main(void *data)
@@ -3823,12 +4064,13 @@ static void poll_server(void)
                            reported_hdr_active, app.windows_monitor_path,
                            SDL_arraysize(app.windows_monitor_path));
 #else
-    /* There is no DXGI swapchain and no OS presentation-mode query here, and no
-     * portable way to read the display's active ICC profile either. Report what
-     * this build genuinely knows - the colorspace the renderer presents in and
-     * the video backend carrying it - instead of a placeholder that reads as a
-     * failure. active_profile stays empty because none was read, not because
-     * none is installed. */
+    /* There is no DXGI swapchain and no OS presentation-mode query here.
+     * Report what this build genuinely knows - the colorspace the renderer
+     * presents in and the video backend carrying it - instead of a
+     * placeholder that reads as a failure. The active profile is filled in
+     * below by whichever platform owns the assignment, KWin or ColorSync;
+     * when neither reports one, active_profile stays empty because none was
+     * read, not because none is installed. */
     {
         SDL_PropertiesID renderer_props =
             app.renderer ? SDL_GetRendererProperties(app.renderer) : 0;
@@ -3847,6 +4089,15 @@ static void poll_server(void)
         if (driver && driver[0])
             SDL_strlcpy(presentation_mode, driver, sizeof(presentation_mode));
     }
+#ifdef __APPLE__
+    /* Ask ColorSync which profile macOS has assigned to this display. The
+     * name goes into the status JSON exactly where the Linux build reports
+     * the KWin assignment, and the path is what the explicit correction
+     * modes read. */
+    macos_active_profile(app.selected_display_id, active_profile,
+                         sizeof(active_profile), app.macos_profile_path,
+                         sizeof(app.macos_profile_path));
+#else
     /* Ask KWin what it has assigned to this output, and which of its two slots
      * applies. Plasma 6.7 keeps SDR and HDR assignments apart, and an HDR
      * display routinely carries an HDR profile with an EMPTY SDR one - reading
@@ -3869,6 +4120,7 @@ static void poll_server(void)
             }
         }
     }
+#endif
 #endif
     /* Carry the reason a requested transform is not running, so the server does
      * not have to guess whether a profile is missing or the whole feature is.
@@ -3913,6 +4165,10 @@ static void poll_server(void)
 #ifdef _WIN32
             wcsncpy(app.correction_profile_path,active_profile_path,SDL_arraysize(app.correction_profile_path)-1);
             app.correction_profile_path[SDL_arraysize(app.correction_profile_path)-1]=L'\0';
+#elif defined(__APPLE__)
+            /* The path to read was captured from ColorSync above, and macOS
+             * keeps compositing through the assigned profile in every mode -
+             * there is no compositor source to toggle the way KWin has. */
 #else
             {
                 KWinOutputState output;
@@ -4648,7 +4904,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
         SDL_SetAtomicInt(&state->quit_requested, 1);
         if (state->network_thread) SDL_WaitThread(state->network_thread, NULL);
         if (state->install_thread) SDL_WaitThread(state->install_thread, NULL);
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
         kwin_restore_profile_source();
 #endif
         if (state->texture) SDL_DestroyTexture(state->texture);
