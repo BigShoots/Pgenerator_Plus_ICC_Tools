@@ -9,6 +9,8 @@
 #   ./run-experiment-2.sh --check <display-id>     verify meter and HDR, measure nothing
 #   ./run-experiment-2.sh <display-id> <label>     PQ sweep, results to CSV
 #   ./run-experiment-2.sh --scrgb <id> <label>     extended-linear sweep
+#   ./run-experiment-2.sh --scrgb-color <id> <lbl> channel additivity
+#   ./run-experiment-2.sh --ceiling <id>           find the full-field limit
 #
 # Run the sweep three times, changing one thing each time:
 #
@@ -205,6 +207,111 @@ if worst < 0.05:
 else:
     print("  NOT LINEAR even below SDR white, so this path is no better than PQ.")
 SPY
+    exit 0
+fi
+
+# ------------------------------------------------------- additivity + ceiling
+#
+# Two things the grey sweep could not answer.
+#
+# ADDITIVITY. An ICC matrix profile assumes the channels are independent and
+# sum: measured XYZ(R) + XYZ(G) + XYZ(B) should equal XYZ(white) at the same
+# level. If they do, the extended-linear path behaves like a display and can be
+# profiled. If they do not, something is cross-coupling the channels.
+#
+# CEILING. Reported headroom overstates what a FULL-FIELD patch can reach - on
+# the M5, 2.667 headroom implied 1683 cd/m2 while full-field white topped out
+# near 678. A run has to know where the real limit is, because every value
+# above it measures the same and would silently flatten a profile.
+if [ $# -ge 3 ] && [ "$1" = "--scrgb-color" ]; then
+    DISPLAY_ID=$2
+    LABEL=$3
+    check_meter || exit 1
+    OUT="scrgb-color-$LABEL.csv"
+    echo "patch,value,Y,x,y,X,Z" > "$OUT"
+    echo
+    echo "additivity check at 0.5 and 1.0  ->  $OUT"
+    for level in 0.5 1.0; do
+        echo
+        echo "level $level:"
+        for patch in "white:$level,$level,$level" "red:$level,0,0" \
+                     "green:0,$level,0" "blue:0,0,$level"; do
+            name=${patch%%:*}; rgb=${patch#*:}
+            log=$(mktemp)
+            ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" --scrgb-rgb "$rgb" \
+                --dwell "$DWELL" >"$log" 2>&1 &
+            probe=$!
+            sleep 3
+            kill -0 $probe 2>/dev/null || { echo "  $name: probe died" >&2
+                                            sed 's/^/    /' "$log" >&2
+                                            rm -f "$log"; continue; }
+            reading=$(read_meter)
+            grep -E "^WARNING" "$log" | sed 's/^/    /' >&2
+            kill $probe 2>/dev/null; wait $probe 2>/dev/null; rm -f "$log"
+            [ -z "$reading" ] && { echo "  $name: no reading" >&2; continue; }
+            set -- $reading
+            # Yxy -> XYZ, so the three channels can be summed.
+            read X Z <<<"$(python3 -c "
+Y,x,y=$1,$2,$3
+print(f'{x*Y/y:.6f} {(1-x-y)*Y/y:.6f}')")"
+            printf "  %-6s Y %-10s x %-8s y %s\n" "$name" "$1" "$2" "$3"
+            echo "$name,$level,$1,$2,$3,$X,$Z" >> "$OUT"
+        done
+    done
+    echo
+    python3 - "$OUT" <<'APY'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+for level in sorted({r["value"] for r in rows}):
+    at = {r["patch"]: r for r in rows if r["value"] == level}
+    if not all(k in at for k in ("white", "red", "green", "blue")):
+        print(f"  level {level}: incomplete"); continue
+    def xyz(p): return tuple(float(at[p][k]) for k in ("X", "Y", "Z"))
+    w = xyz("white")
+    s = tuple(sum(xyz(p)[i] for p in ("red", "green", "blue")) for i in range(3))
+    err = max(abs(s[i] - w[i]) / w[i] for i in range(3) if w[i])
+    print(f"  level {level}:  white XYZ {w[0]:.2f} {w[1]:.2f} {w[2]:.2f}")
+    print(f"            R+G+B XYZ {s[0]:.2f} {s[1]:.2f} {s[2]:.2f}   worst {err*100:.1f}%")
+    print("            " + ("ADDITIVE - behaves like a display, profilable"
+                            if err < 0.05 else
+                            "NOT ADDITIVE - channels are cross-coupling"))
+APY
+    exit 0
+fi
+
+if [ $# -ge 2 ] && [ "$1" = "--ceiling" ]; then
+    DISPLAY_ID=$2
+    check_meter || exit 1
+    echo
+    echo "climbing until full-field output stops rising:"
+    printf "  %-8s %-12s %s\n" value measured "vs previous"
+    PREV=""
+    for v in 1.0 1.25 1.5 1.75 2.0 2.5 3.0 4.0; do
+        log=$(mktemp)
+        ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" --scrgb "$v" \
+            --dwell "$DWELL" >"$log" 2>&1 &
+        probe=$!
+        sleep 3
+        kill -0 $probe 2>/dev/null || { rm -f "$log"; break; }
+        reading=$(read_meter)
+        kill $probe 2>/dev/null; wait $probe 2>/dev/null; rm -f "$log"
+        [ -z "$reading" ] && break
+        set -- $reading
+        if [ -n "$PREV" ]; then
+            gain=$(python3 -c "print(f'{$1/$PREV:.3f}')")
+        else
+            gain="-"
+        fi
+        printf "  %-8s %-12s %s\n" "$v" "$1" "$gain"
+        if [ -n "$PREV" ] && [ "$(python3 -c "print(1 if $1/$PREV < 1.02 else 0)")" = "1" ]; then
+            echo
+            echo "  CEILING near $1 cd/m2 - output stopped rising at value $v."
+            echo "  Patches above that measure the same and would flatten the top"
+            echo "  of a profile. Cap HDR targets here, not at the reported headroom."
+            break
+        fi
+        PREV=$1
+    done
     exit 0
 fi
 

@@ -74,10 +74,66 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <IOKit/IOKitLib.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+/* ---- measurement hygiene ------------------------------------------------
+ *
+ * Three things can quietly ruin a sweep: the display dimming or sleeping part
+ * way through, the cursor sitting where the meter is, and the brightness
+ * moving under us. The first two can be prevented outright with public APIs.
+ * The third cannot be prevented - True Tone, Night Shift and auto-brightness
+ * all live behind private frameworks - but on a built-in panel it can be
+ * DETECTED, which is enough to throw the run out rather than publish it.
+ */
+
+/* The backlight's target luminance, straight from the IORegistry. No
+ * privileges and no private framework: AppleARMBacklight publishes
+ * IODisplayParameters.BrightnessMilliNits. Built-in panels only - an external
+ * display's brightness is the monitor's business, not macOS's. Returns -1 when
+ * unavailable. */
+static double backlight_nits(void)
+{
+    io_iterator_t iterator = MACH_PORT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+            IOServiceMatching("AppleARMBacklight"), &iterator) != KERN_SUCCESS)
+        return -1.0;
+
+    double nits = -1.0;
+    io_object_t service;
+    while ((service = IOIteratorNext(iterator))) {
+        CFMutableDictionaryRef properties = NULL;
+        if (IORegistryEntryCreateCFProperties(service, &properties,
+                kCFAllocatorDefault, 0) == KERN_SUCCESS && properties) {
+            NSDictionary *all = (__bridge NSDictionary *)properties;
+            NSDictionary *parameters = all[@"IODisplayParameters"];
+            NSDictionary *brightness = parameters[@"BrightnessMilliNits"];
+            NSNumber *value = brightness[@"value"];
+            if (value) nits = value.doubleValue / 1000.0;
+            CFRelease(properties);
+        }
+        IOObjectRelease(service);
+    }
+    IOObjectRelease(iterator);
+    return nits;
+}
+
+static volatile bool g_display_reconfigured = false;
+
+static void display_reconfigured(CGDirectDisplayID display,
+                                 CGDisplayChangeSummaryFlags flags, void *user)
+{
+    (void)display; (void)user;
+    /* A mode change, a gain or loss of a display, or a mirroring change all
+     * invalidate whatever is being measured. Begin/end notifications alone are
+     * not interesting. */
+    if (flags & ~(CGDisplayChangeSummaryFlags)(kCGDisplayBeginConfigurationFlag))
+        g_display_reconfigured = true;
+}
 
 /* SMPTE ST 2084. Y is absolute luminance normalised to 10000 cd/m2. */
 static double pq_from_nits(double nits)
@@ -186,6 +242,7 @@ int main(int argc, const char *argv[])
          * it use the headroom - so if the response is linear in this value,
          * absolute luminance is addressable without PQ ever being involved. */
         double scrgb_value = -1.0;
+        double scrgb_rgb[3] = {-1.0, -1.0, -1.0};
         bool use_metadata = true;
         bool primaries_mode = false;
         double metadata_max = 1000.0, metadata_min = 0.005;
@@ -229,6 +286,13 @@ int main(int argc, const char *argv[])
             else if (!strcmp(argv[index], "--primaries")) primaries_mode = true;
             else if (!strcmp(argv[index], "--scrgb") && index + 1 < argc)
                 scrgb_value = atof(argv[++index]);
+            else if (!strcmp(argv[index], "--scrgb-rgb") && index + 1 < argc) {
+                sscanf(argv[++index], "%lf,%lf,%lf",
+                       &scrgb_rgb[0], &scrgb_rgb[1], &scrgb_rgb[2]);
+                /* Any non-negative component turns the mode on; the grey value
+                 * is only used for the label. */
+                scrgb_value = scrgb_rgb[0] >= 0.0 ? scrgb_rgb[0] : 0.0;
+            }
             else if (!strcmp(argv[index], "--sdr") && index + 1 < argc)
                 sscanf(argv[++index], "%d,%d,%d",
                        &sdr_rgb[0], &sdr_rgb[1], &sdr_rgb[2]);
@@ -247,6 +311,24 @@ int main(int argc, const char *argv[])
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
+        /* Keep the display awake for the whole run. A sweep can easily outlast
+         * the idle timer, and a display that dims mid-sweep produces numbers
+         * that look plausible and are wrong. */
+        IOPMAssertionID sleep_assertion = kIOPMNullAssertionID;
+        IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                                    kIOPMAssertionLevelOn,
+                                    CFSTR("PGenerator+ measurement in progress"),
+                                    &sleep_assertion);
+        CGDisplayRegisterReconfigurationCallback(display_reconfigured, NULL);
+        double backlight_at_start = backlight_nits();
+        /* Test hook: forcing the baseline is the only way to exercise the
+         * drift warning without accessibility permission to move the
+         * brightness keys. An unverified warning is not a warning. */
+        {
+            const char *forced = getenv("PGEN_TEST_BACKLIGHT_BASELINE");
+            if (forced && *forced) backlight_at_start = atof(forced);
+        }
+
         NSScreen *screen = nil;
         CGDirectDisplayID display;
         if (wanted_id) {
@@ -261,6 +343,8 @@ int main(int argc, const char *argv[])
         }
 
         printf("\nprobe build  %s %s\n", __DATE__, __TIME__);
+        if (backlight_at_start > 0.0)
+            printf("backlight    %.1f cd/m2 target (IORegistry)\n", backlight_at_start);
         printf("layer host   %s\n",
                sdr_rgb[0] >= 0 && sdr_layout == 1
                    ? "view's own layer (as SDL does)"
@@ -455,7 +539,32 @@ int main(int argc, const char *argv[])
         if (@available(macOS 14.0, *)) [NSApp activate];
         else [NSApp activateIgnoringOtherApps:YES];
 
+        /* The cursor is opaque and sits wherever it was left - including,
+         * often, in the middle of the screen where the meter is. */
+        CGDisplayHideCursor(display);
+
         id<MTLCommandQueue> queue = [layer.device newCommandQueue];
+
+        /* Called after each measurement window. Anything it reports means the
+         * reading that was just taken should be discarded, not adjusted. */
+        void (^report_hygiene)(void) = ^{
+            if (g_display_reconfigured)
+                printf("WARNING: the display was reconfigured during this "
+                       "measurement - mode, mirroring or attachment changed. "
+                       "Discard this reading.\n");
+            double now = backlight_nits();
+            if (backlight_at_start > 0.0 && now > 0.0) {
+                double drift = fabs(now - backlight_at_start) / backlight_at_start;
+                if (drift > 0.01)
+                    printf("WARNING: backlight moved from %.1f to %.1f cd/m2 "
+                           "(%.1f%%) during this run. Auto-brightness, True Tone "
+                           "or Night Shift is active - none can be disabled "
+                           "through a public API, so turn them off by hand. "
+                           "Discard this reading.\n",
+                           backlight_at_start, now, drift * 100.0);
+            }
+            fflush(stdout);
+        };
 
         /* Run this only after the first frames are up: the window server does
          * not list a window as on screen until it has been composited, so
@@ -541,9 +650,12 @@ int main(int argc, const char *argv[])
 
         printf("\n");
         if (scrgb_mode) {
-            printf("presenting scRGB value %.4f\n", scrgb_value);
+            double sr = scrgb_rgb[0] >= 0.0 ? scrgb_rgb[0] : scrgb_value;
+            double sg = scrgb_rgb[1] >= 0.0 ? scrgb_rgb[1] : scrgb_value;
+            double sb = scrgb_rgb[2] >= 0.0 ? scrgb_rgb[2] : scrgb_value;
+            printf("presenting scRGB %.4f, %.4f, %.4f\n", sr, sg, sb);
             for (int frame = 0; frame < 3; frame++) {
-                present(scrgb_value, scrgb_value, scrgb_value); pump(0.2);
+                present(sr, sg, sb); pump(0.2);
             }
             report_on_screen();
             printf("EDR headroom while presenting: %.3f (potential %.3f, "
@@ -559,6 +671,7 @@ int main(int argc, const char *argv[])
             if (dwell > 0.0) { printf("holding for %.0fs\n", dwell); fflush(stdout); pump(dwell); }
             else if (isatty(fileno(stdin))) { printf("press Return to exit.\n"); getchar(); }
             else pump(30.0);
+            report_hygiene();
             return 0;
         }
         if (sdr_mode) {
@@ -673,6 +786,12 @@ int main(int argc, const char *argv[])
                 else { printf("   [measure, Return for next] "); getchar(); }
             }
         }
+
+        report_hygiene();
+        CGDisplayShowCursor(display);
+        CGDisplayRemoveReconfigurationCallback(display_reconfigured, NULL);
+        if (sleep_assertion != kIOPMNullAssertionID)
+            IOPMAssertionRelease(sleep_assertion);
 
         printf("\ndone. Compare A (slider 50%%) against B (slider 100%%):\n"
                "a difference above 2%% means WindowServer is tone-mapping and\n"
