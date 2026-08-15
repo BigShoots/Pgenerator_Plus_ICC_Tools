@@ -241,6 +241,238 @@ void pgen_macos_free(void *data)
 }
 
 /* ------------------------------------------------------------------ *
+ * Profile Loader side: enumerate, install, assign, verify
+ * ------------------------------------------------------------------ */
+
+/* An FNV-1a of the ICC payload. Identity only - a display colour space has no
+ * useful name to compare, so this is how "is WindowServer using that file"
+ * gets answered. */
+static uint32_t icc_digest(const uint8_t *bytes, size_t length)
+{
+    uint32_t sum = 2166136261u;
+    for (size_t index = 0; index < length; index++) {
+        sum ^= bytes[index];
+        sum *= 16777619u;
+    }
+    return sum;
+}
+
+static CGDirectDisplayID display_id_for_uuid(const char *text)
+{
+    if (!text || !text[0]) return 0;
+    CFStringRef string = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
+    if (!string) return 0;
+    CFUUIDRef uuid = CFUUIDCreateFromString(NULL, string);
+    CFRelease(string);
+    if (!uuid) return 0;
+    CGDirectDisplayID display = CGDisplayGetDisplayIDFromUUID(uuid);
+    CFRelease(uuid);
+    return display;
+}
+
+static void fill_display_entry(CGDirectDisplayID display, PgenMacDisplay *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->display_id = display;
+
+    CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display);
+    if (uuid) {
+        NSString *text = CFBridgingRelease(CFUUIDCreateString(NULL, uuid));
+        snprintf(out->uuid, sizeof(out->uuid), "%s", text.UTF8String);
+        CFRelease(uuid);
+    }
+    for (NSScreen *screen in NSScreen.screens) {
+        NSNumber *number = screen.deviceDescription[@"NSScreenNumber"];
+        if (number.unsignedIntValue != display) continue;
+        snprintf(out->name, sizeof(out->name), "%s", screen.localizedName.UTF8String);
+        out->edr_headroom = screen.maximumExtendedDynamicRangeColorComponentValue;
+        out->edr_potential_headroom =
+            screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
+        break;
+    }
+    if (!out->name[0]) snprintf(out->name, sizeof(out->name), "Display %u", display);
+    out->hdr = out->edr_potential_headroom > 1.0;
+
+    NSURL *url = registered_profile_url(display);
+    if (url) snprintf(out->icc_path, sizeof(out->icc_path), "%s", url.path.UTF8String);
+    out->valid = true;
+}
+
+int pgen_macos_enumerate_displays(PgenMacDisplay *out, int capacity)
+{
+    if (!out || capacity <= 0) return 0;
+    @autoreleasepool {
+        CGDirectDisplayID displays[32];
+        uint32_t count = 0;
+        if (CGGetOnlineDisplayList(32, displays, &count) != kCGErrorSuccess) return 0;
+        int written = 0;
+        for (uint32_t index = 0; index < count && written < capacity; index++) {
+            /* Skip a display that is only mirroring another - it has no
+             * independent profile slot to assign. */
+            if (CGDisplayIsInMirrorSet(displays[index]) &&
+                CGDisplayMirrorsDisplay(displays[index]) != kCGNullDirectDisplay)
+                continue;
+            fill_display_entry(displays[index], &out[written++]);
+        }
+        return written;
+    }
+}
+
+void pgen_macos_user_profile_directory(char *out, size_t out_size)
+{
+    @autoreleasepool {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(
+            NSLibraryDirectory, NSUserDomainMask, YES);
+        NSString *library = paths.firstObject ?: NSHomeDirectory();
+        NSString *directory = [library stringByAppendingPathComponent:@"ColorSync/Profiles"];
+        snprintf(out, out_size, "%s", directory.UTF8String);
+    }
+}
+
+bool pgen_macos_install_profile(const char *source_path,
+                                char *installed_path, size_t installed_size,
+                                char *message, size_t message_size)
+{
+    if (installed_path && installed_size) installed_path[0] = '\0';
+    if (message && message_size) message[0] = '\0';
+    if (!source_path || !source_path[0]) return false;
+
+    @autoreleasepool {
+        NSURL *source = [NSURL fileURLWithPath:@(source_path)];
+        CFErrorRef error = NULL;
+        ColorSyncProfileRef profile =
+            ColorSyncProfileCreateWithURL((__bridge CFURLRef)source, &error);
+        if (!profile) {
+            if (message)
+                snprintf(message, message_size, "%s is not a readable ICC profile: %s",
+                         source.lastPathComponent.UTF8String,
+                         [(__bridge NSError *)error localizedDescription].UTF8String
+                             ?: "no detail reported");
+            return false;
+        }
+        /* Refuse a malformed profile here rather than at assignment, where the
+         * failure would look like a ColorSync problem instead of a bad file. */
+        CFErrorRef problems = NULL, warnings = NULL;
+        if (!ColorSyncProfileVerify(profile, &problems, &warnings)) {
+            if (message)
+                snprintf(message, message_size, "%s failed ColorSync validation: %s",
+                         source.lastPathComponent.UTF8String,
+                         [(__bridge NSError *)problems localizedDescription].UTF8String
+                             ?: "no detail reported");
+            if (problems) CFRelease(problems);
+            if (warnings) CFRelease(warnings);
+            CFRelease(profile);
+            return false;
+        }
+        if (problems) CFRelease(problems);
+        if (warnings) CFRelease(warnings);
+
+        /* User domain: no privileges, unlike the Linux build's pkexec step for
+         * /usr/share/color/icc. ColorSyncProfileInstall both copies the file
+         * into ~/Library/ColorSync/Profiles and registers it. */
+        CFErrorRef install_error = NULL;
+        /* subpath is the name the profile takes inside the domain's Profiles
+         * directory, and it is annotated non-null, so pass the source filename
+         * rather than letting ColorSync choose. */
+        bool ok = ColorSyncProfileInstall(profile,
+                                          kColorSyncProfileUserDomain,
+                                          (__bridge CFStringRef)source.lastPathComponent,
+                                          &install_error);
+        if (!ok && message)
+            snprintf(message, message_size, "Could not install %s: %s",
+                     source.lastPathComponent.UTF8String,
+                     [(__bridge NSError *)install_error localizedDescription].UTF8String
+                         ?: "no detail reported");
+        if (ok && installed_path) {
+            CFURLRef url = ColorSyncProfileGetURL(profile, NULL);
+            NSString *path = url ? ((__bridge NSURL *)url).path : nil;
+            if (path) snprintf(installed_path, installed_size, "%s", path.UTF8String);
+            else {
+                char directory[1024];
+                pgen_macos_user_profile_directory(directory, sizeof(directory));
+                snprintf(installed_path, installed_size, "%s/%s", directory,
+                         source.lastPathComponent.UTF8String);
+            }
+        }
+        CFRelease(profile);
+        return ok;
+    }
+}
+
+bool pgen_macos_assign_profile(const char *display_uuid, const char *icc_path,
+                               char *message, size_t message_size)
+{
+    if (message && message_size) message[0] = '\0';
+
+    @autoreleasepool {
+        CGDirectDisplayID display = display_id_for_uuid(display_uuid);
+        if (!display) {
+            if (message) snprintf(message, message_size,
+                                  "That display is no longer attached.");
+            return false;
+        }
+        CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display);
+        if (!uuid) {
+            if (message) snprintf(message, message_size,
+                                  "macOS did not report a stable identifier for "
+                                  "that display.");
+            return false;
+        }
+        /* The flat shape SetCustomProfiles documents: ProfileID -> CFURLRef,
+         * with kCFNull to drop back to the factory profile. This is NOT the
+         * nested dictionary that device *registration* takes. */
+        NSURL *url = (icc_path && icc_path[0])
+            ? [NSURL fileURLWithPath:@(icc_path)] : nil;
+        NSDictionary *info = @{
+            (__bridge NSString *)kColorSyncDeviceDefaultProfileID:
+                url ? (id)url : (id)[NSNull null],
+        };
+        bool ok = ColorSyncDeviceSetCustomProfiles(kColorSyncDisplayDeviceClass, uuid,
+                                                   (__bridge CFDictionaryRef)info);
+        CFRelease(uuid);
+        if (!ok && message)
+            snprintf(message, message_size,
+                     "ColorSync refused the assignment for %s.",
+                     display_uuid ? display_uuid : "that display");
+        return ok;
+    }
+}
+
+bool pgen_macos_windowserver_uses(const char *display_uuid, const char *icc_path)
+{
+    if (!icc_path || !icc_path[0]) return false;
+
+    @autoreleasepool {
+        CGDirectDisplayID display = display_id_for_uuid(display_uuid);
+        if (!display) return false;
+
+        NSData *wanted = [NSData dataWithContentsOfFile:@(icc_path)];
+        if (!wanted) return false;
+
+        CGColorSpaceRef space = CGDisplayCopyColorSpace(display);
+        if (!space) return false;
+        CFDataRef live = CGColorSpaceCopyICCData(space);
+        CGColorSpaceRelease(space);
+        if (!live) return false;
+
+        bool same = CFDataGetLength(live) == (CFIndex)wanted.length &&
+                    icc_digest(CFDataGetBytePtr(live), (size_t)CFDataGetLength(live)) ==
+                    icc_digest(wanted.bytes, wanted.length);
+        CFRelease(live);
+        return same;
+    }
+}
+
+void pgen_macos_open_display_settings(void)
+{
+    @autoreleasepool {
+        NSURL *url = [NSURL URLWithString:
+            @"x-apple.systempreferences:com.apple.Displays-Settings.extension"];
+        [NSWorkspace.sharedWorkspace openURL:url];
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * vcgt
  * ------------------------------------------------------------------ */
 

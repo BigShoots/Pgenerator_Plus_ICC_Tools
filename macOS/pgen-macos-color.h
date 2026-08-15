@@ -59,6 +59,47 @@ typedef struct {
  * ColorSync state. Returns false when the display cannot be matched. */
 bool pgen_macos_display_state(unsigned int sdl_display_id, PgenMacDisplay *out);
 
+/* ---- Profile Loader side -------------------------------------------- *
+ * The Companion only ever reads. These are the write half, used by the macOS
+ * Profile Loader, and they are what replaces kscreen-doctor and colormgr.
+ */
+
+/* Every online display, in CoreGraphics order. Returns how many were written.
+ * Unlike the Linux path there is no compositor to interrogate and no colord
+ * fallback to arrange - ColorSync is always present. */
+int pgen_macos_enumerate_displays(PgenMacDisplay *out, int capacity);
+
+/* Assign a profile to a display, keyed by the UUID from PgenMacDisplay. Pass
+ * NULL for icc_path to fall back to the display's factory profile, which is
+ * the documented kCFNull path and the macOS equivalent of clearing.
+ *
+ * macOS has one profile slot per display - no SDR/HDR pair like Windows'
+ * COLORPROFILESUBTYPE 7 and 8, or KWin's iccProfilePath and hdrIccProfilePath
+ * - so there is nothing to choose between here. */
+bool pgen_macos_assign_profile(const char *display_uuid, const char *icc_path,
+                               char *message, size_t message_size);
+
+/* Copy a profile into ~/Library/ColorSync/Profiles and register it, in one
+ * call, with no privileges required. `installed_path` receives where it landed.
+ * The profile is validated first; an unreadable or malformed one is refused
+ * here rather than at assignment time. */
+bool pgen_macos_install_profile(const char *source_path,
+                                char *installed_path, size_t installed_size,
+                                char *message, size_t message_size);
+
+/* Whether WindowServer is actually rendering with this profile, as opposed to
+ * the device database merely recording it. The two can disagree, and only the
+ * first one means the display is really calibrated - so this is what "verified"
+ * should be based on. Compares the ICC payload, because a display colour space
+ * has no useful name to compare. */
+bool pgen_macos_windowserver_uses(const char *display_uuid, const char *icc_path);
+
+/* Open System Settings at the display colour section. */
+void pgen_macos_open_display_settings(void);
+
+/* Where a user's own profiles belong: ~/Library/ColorSync/Profiles. */
+void pgen_macos_user_profile_directory(char *out, size_t out_size);
+
 /* Read the bytes of the profile the OS is applying to this display. The caller
  * owns the returned buffer and frees it with pgen_macos_free(). Returns NULL
  * when no profile could be read. */

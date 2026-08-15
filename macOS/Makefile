@@ -116,12 +116,20 @@ define bundle
 	@echo "  $(2)"
 endef
 
-bundles: companion icon
+bundles: companion loader icon
 	@mkdir -p $(DIST)
 	@echo "bundling:"
 	$(call bundle,$(COMPANION_BIN),$(COMPANION_APP),PGenerator+ Patch Companion,com.pgeneratorplus.patchcompanion)
-	@if [ -f $(LOADER_BIN) ]; then $(MAKE) --no-print-directory bundle-loader; \
-	 else echo "  (Profile Loader not built yet)"; fi
+	@$(MAKE) --no-print-directory bundle-loader
+	@# The Companion finds the Loader with companion_tool_path(), which looks
+	@# beside the executable - and SDL_GetBasePath() is Contents/Resources on
+	@# macOS. Put a copy there so Install & Apply works wherever the user drags
+	@# the app, and ship the standalone .app too so the Loader can be opened on
+	@# its own and registered as a login item.
+	@cp $(LOADER_BIN) "$(COMPANION_APP)/Contents/Resources/"
+	@codesign --force --sign - --identifier com.pgeneratorplus.patchcompanion \
+	  "$(COMPANION_APP)" 2>/dev/null || true
+	@echo "  (Profile Loader nested in the Companion for Install & Apply)"
 
 .PHONY: bundle-loader
 bundle-loader:
