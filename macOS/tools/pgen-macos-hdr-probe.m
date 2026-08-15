@@ -251,7 +251,14 @@ int main(int argc, const char *argv[])
             display = display_at_index(display_index, &screen);
         }
 
-        printf("\ndisplay      [%d] %s (0x%08x)\n", display_index,
+        printf("\nprobe build  %s %s\n", __DATE__, __TIME__);
+        printf("layer host   %s\n",
+               sdr_rgb[0] >= 0 && sdr_layout == 1
+                   ? "view's own layer (as SDL does)"
+                   : sdr_layout == 2 ? "sRGB control layer"
+                   : sdr_layout == 0 && sdr_rgb[0] >= 0 ? "sublayer (split view)"
+                   : "view's own layer");
+        printf("display      [%d] %s (0x%08x)\n", display_index,
                screen.localizedName.UTF8String, display);
         printf("EDR headroom %.3f now, %.3f potential\n",
                screen.maximumExtendedDynamicRangeColorComponentValue,
@@ -522,6 +529,9 @@ int main(int argc, const char *argv[])
                 printf("full screen: sRGB-tagged control layer\n");
             }
             printf("filled with RGB(%d,%d,%d)\n", sdr_rgb[0], sdr_rgb[1], sdr_rgb[2]);
+            if (sdr_rgb[0] == sdr_rgb[1] && sdr_rgb[1] == sdr_rgb[2] && sdr_rgb[0] > 0)
+                printf("  (neutral: invariant under a colorant swap, so any "
+                       "change here is NOT the swap)\n");
             if (sdr_layout == 0) {
                 printf("\nWith a permuted profile assigned to THIS display:\n");
                 printf("  halves differ     -> PASS, our pixels are not converted\n");

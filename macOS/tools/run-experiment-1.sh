@@ -241,70 +241,89 @@ if [ $# -ge 2 ] && [ "$1" = "--vcgt" ]; then
     trap cleanup_vcgt EXIT INT TERM
 
     echo
-    echo "measuring our layer with the display's OWN profile..."
-    BEFORE=$(measure_fill 255,0,0 before)
-    echo "  ${BEFORE:-(none)}"
+    echo "Four measurements, plus a drift check. Keep the meter still throughout."
+    echo
+    echo "with the display's OWN profile:"
+    RED_BEFORE=$(measure_fill 255,0,0 red-before)
+    echo "  red    ${RED_BEFORE:-(none)}"
+    WHITE_BEFORE=$(measure_fill 255,255,255 white-before)
+    echo "  white  ${WHITE_BEFORE:-(none)}"
 
     echo "building a profile that differs by exactly two bytes..."
     python3 make-permuted-profile.py build "$ORIGINAL" /tmp/pgen-permuted-vcgt.icc \
         --minimal || exit 1
 
-    # Verify what was actually built, rather than trusting that the right code
-    # ran. A stale copy of make-permuted-profile.py silently produced a full
-    # rebuild once, and the run looked normal while comparing two profiles that
-    # differed in far more than their colorants - which is precisely the
-    # confound this mode exists to remove.
+    # Verify what was actually built rather than trusting the right code ran.
+    # A stale copy silently produced a full rebuild once, and the run looked
+    # normal while comparing profiles that differed in far more than colorants.
     DIFFERING=$(cmp -l "$ORIGINAL" /tmp/pgen-permuted-vcgt.icc 2>/dev/null | wc -l | tr -d " ")
     if [ "${DIFFERING:-0}" != "2" ]; then
         echo >&2
-        echo "  ABORTING: that profile differs from the original in ${DIFFERING:-many}" >&2
-        echo "  bytes, not 2. The minimal builder did not run, so this comparison" >&2
-        echo "  would be measuring more than the colorants and could not answer" >&2
-        echo "  the question. Nothing has been assigned." >&2
-        echo >&2
-        echo "  Check that make-permuted-profile.py in this folder has" >&2
-        echo "  build_minimal - it is missing from stale copies." >&2
+        echo "  ABORTING: that profile differs in ${DIFFERING:-many} bytes, not 2." >&2
+        echo "  The minimal builder did not run. Nothing has been assigned." >&2
         exit 1
     fi
-    echo "  verified: exactly 2 bytes differ from the display's own profile"
+    echo "  verified: exactly 2 bytes differ"
+
     ./pgen-colorsync-probe assign "$DISPLAY_ID" /tmp/pgen-permuted-vcgt.icc >/dev/null \
         || { echo "assignment failed" >&2; exit 1; }
     ASSIGNED=1
     sleep 2
 
-    echo "measuring our layer with only the colorant tags swapped..."
-    AFTER=$(measure_fill 255,0,0 after)
-    echo "  ${AFTER:-(none)}"
+    echo "with the colorant tags swapped:"
+    RED_AFTER=$(measure_fill 255,0,0 red-after)
+    echo "  red    ${RED_AFTER:-(none)}"
+    WHITE_AFTER=$(measure_fill 255,255,255 white-after)
+    echo "  white  ${WHITE_AFTER:-(none)}"
 
     cleanup_vcgt
+    sleep 2
+    echo "back on the display's own profile, re-measuring red (drift check):"
+    RED_AGAIN=$(measure_fill 255,0,0 red-again)
+    echo "  red    ${RED_AGAIN:-(none)}"
 
-    python3 - "${BEFORE:-}" "${AFTER:-}" <<'VPY'
+    python3 - "${RED_BEFORE:-}" "${WHITE_BEFORE:-}" "${RED_AFTER:-}" \
+             "${WHITE_AFTER:-}" "${RED_AGAIN:-}" <<'VPY'
 import sys
 def parse(t):
     p = t.split()
     return [float(v) for v in p] if len(p) == 3 else None
-before, after = parse(sys.argv[1]), parse(sys.argv[2])
+rb, wb, ra, wa, rg = (parse(a) for a in sys.argv[1:6])
 print()
-if not before or not after:
-    print("  no result - reasons are above.")
+if not all([rb, wb, ra, wa, rg]):
+    print("  incomplete - reasons are above.")
     raise SystemExit(1)
-_, bx, by = before
-_, ax, ay = after
-d = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
-print(f"  own profile        x {bx:.4f}  y {by:.4f}")
-print(f"  colorants swapped  x {ax:.4f}  y {ay:.4f}")
-print(f"  difference         {d:.4f} in xy")
+def d(a, b):
+    return ((a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+red_delta, white_delta, drift = d(rb, ra), d(wb, wa), d(rb, rg)
+print(f"  red    own {rb[1]:.4f},{rb[2]:.4f}  Y {rb[0]:6.2f}   "
+      f"swapped {ra[1]:.4f},{ra[2]:.4f}  Y {ra[0]:6.2f}   delta {red_delta:.4f}")
+print(f"  white  own {wb[1]:.4f},{wb[2]:.4f}  Y {wb[0]:6.2f}   "
+      f"swapped {wa[1]:.4f},{wa[2]:.4f}  Y {wa[0]:6.2f}   delta {white_delta:.4f}")
+print(f"  drift  red re-measured on the own profile: delta {drift:.4f}")
 print()
-if d < 0.01:
-    print("  CONFIRMED. Two bytes of colorant change moved nothing, so the ICC")
-    print("  colorants do not reach our layer at all. Every earlier shift came")
-    print("  from rebuilding the profile - the dropped Apple gamma tags - which")
-    print("  is the GPU path, not the ICC path. The design holds.")
+if drift > 0.01:
+    print("  UNSTABLE. Red did not return to its starting value after the")
+    print("  profile was restored, so something is drifting - the panel warming,")
+    print("  the meter settling, or the restore not taking. The other numbers")
+    print("  cannot be trusted until this is stable.")
+elif red_delta < 0.01 and white_delta < 0.01:
+    print("  CONFIRMED. Neither red nor white moved. The display profile does")
+    print("  not reach our layer at all - the SDR premise holds completely.")
+elif red_delta > 0.01 and white_delta < 0.01:
+    print("  PROFILE TRANSFORM REACHES OUR LAYER.")
+    print("  Red moved while white did not, which is exactly the signature of a")
+    print("  colorant swap: a neutral sums the same three colorants either way,")
+    print("  so only non-neutrals change. Something derived from the display")
+    print("  profile is being applied to our layer after CoreAnimation declines")
+    print("  to colour-manage it.")
+    print("  This does not break the port, but it changes what 'system' mode")
+    print("  means on macOS and needs to be described accurately.")
 else:
-    print("  SIGNIFICANT. Two bytes of colorant change moved the reading, with")
-    print("  nothing else in the profile altered. Something in the ICC path")
-    print("  does reach our layer, and the correction-mode design needs")
-    print("  revisiting. Report these numbers.")
+    print("  NOT THE COLORANT SWAP. White moved too, and a neutral is invariant")
+    print("  under a red/green swap, so whatever is changing is not that.")
+    print("  Suspect a side effect of assigning any profile at all - a LUT")
+    print("  reload or a recalculated transform.")
 VPY
     exit 0
 fi
