@@ -391,6 +391,6 @@ builds as follows:
 | --- | --- | --- |
 | SDL3 | zlib, `licenses/SDL3-LICENSE.txt` | Include with builds that distribute `SDL3.dll` or `libSDL3`: Patch Companion on both platforms and Linux Profile Loader |
 | DejaVu fonts | Bitstream Vera, `licenses/DejaVu-LICENSE.txt` | Include with Linux Profile Loader because `pgen-ui-font.h` contains rendered DejaVu glyphs |
-| ArgyllCMS | AGPLv3, `licenses/ArgyllCMS-LICENSE.txt` | Include with packages containing `colprof` or `profcheck`, along with the required source offer; source is available from [argyllcms.com](https://www.argyllcms.com/) |
+| ArgyllCMS | AGPLv3, `licenses/ArgyllCMS-LICENSE.txt` | Include with packages containing `colprof` or `profcheck`, along with the required source offer; the bundled binaries are built from our fork, vendored at `vendor/ArgyllCMS_ICC4.4` and published at [BigShoots/ArgyllCMS_ICC4.4](https://github.com/BigShoots/ArgyllCMS_ICC4.4) |
 
 `favicon.ico` is the PGenerator+ application artwork.
