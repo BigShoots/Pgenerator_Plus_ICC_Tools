@@ -11,7 +11,7 @@ platform guards; everything macOS-specific lives in this directory.
 | | |
 |---|---|
 | SDR profiling | works, verified end to end against a mock unit |
-| Code-value passthrough | measured and confirmed with a colorimeter |
+| Code-value passthrough | **partial** — see below; the display profile still reaches the patches |
 | Install & Apply from the WebUI | works |
 | HDR (PQ) profiling | **not supported** — see [HDR](#hdr) |
 | Architecture | Apple Silicon (arm64) |
@@ -104,30 +104,54 @@ xattr -dr com.apple.quarantine /Applications/PGeneratorPlusPatchCompanion.app
 
 Three of these are real limits, not missing work.
 
-### macOS does not colour-manage the patch window
+### macOS colour-manages the patch window in two stages, and we escape only one
 
-**Measured and confirmed** on 2026-08-15, with an X-Rite i1 DisplayPro on an
-ASUS VE228. With a display profile whose red and green colorants were swapped
-assigned to that panel, a nominal red measured:
+Measured on 2026-08-15 with an X-Rite i1 DisplayPro on an 8-bit ASUS VE228 over
+HDMI-to-DVI. Drift across the whole series was 0.0000, so these are stable and
+fully reversible.
+
+**Stage 1 — CoreAnimation colour matching. Our layer escapes this.** With a
+display profile whose red and green colorants were swapped, a nominal red
+measured:
 
 | | x | y |
 |---|---|---|
 | our layer, colorspace nil | 0.5767 | 0.3898 |
 | sRGB-tagged control layer | 0.2893 | 0.6205 |
 
-The control landed on the green primary — macOS converted it. Ours stayed near
-red. 0.369 apart in xy, against a meter noise floor around 0.0001.
+The control landed on the green primary. Ours did not. `CAMetalLayer` performs
+no colour matching while its `colorspace` is nil, and SDL leaves it nil for an
+ordinary SDR window, so this part behaves exactly as documented.
 
-`CAMetalLayer` performs no colour matching while its `colorspace` is nil, and
-SDL leaves it nil for an ordinary SDR window. Patches therefore reach the panel
-as device code values with nothing converting them, which is what a pattern
-generator wants. The Companion re-checks this on every renderer creation, so a
-future SDL that starts tagging the layer cannot silently change what is being
-measured.
+**Stage 2 — a further, profile-derived transform. Our layer does NOT escape
+this.** Swapping only two bytes of the display profile — the `rXYZ` and `gXYZ`
+tag signatures, with every other byte identical — still moved our layer:
 
-It does mean `system` correction means something different here. On Windows and
-KDE it means "the compositor applies the display profile to the patches". On
-macOS it means "device code values, plus whatever vcgt is loaded".
+| | own profile | swapped | delta |
+|---|---|---|---|
+| red | 0.6319, 0.3470 @ 24.55 cd/m² | 0.5799, 0.3870 @ 29.94 | 0.0656 |
+| white | 0.3110, 0.3310 @ 113.24 cd/m² | 0.2999, 0.3483 @ 122.83 | 0.0205 |
+
+White moving is the informative part: a neutral is invariant under a red/green
+colorant swap, since it sums the same three colorants either way. Both colours
+moved the same direction — greener and brighter — which is a per-channel drive
+change rather than a colorimetric conversion. White rising from 113 to 123 cd/m²
+means the panel was not being driven to full beforehand.
+
+A no-op control settles that this is caused by the profile's content and not by
+the act of assignment: re-assigning a byte-identical copy moved red by 0.0000
+and white by 0.0004.
+
+**What this means for profiling.** What the Companion puts on the panel is not
+independent of the assigned display profile. An earlier version of this file
+claimed patches "reach the panel as the code values we ask for"; that is too
+strong and has been retracted. A measurement made with one profile assigned does
+not describe the panel under another, so a profiling run has to control which
+profile is active — and record it.
+
+The mechanism is not yet characterised. Reproduce with
+`macOS/tools/run-experiment-1.sh`, which has `--vcgt` for the two-byte
+comparison and `--noop` for the control.
 
 ### The cLUT and matrix correction modes are refused
 
