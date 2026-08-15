@@ -169,8 +169,17 @@ int main(int argc, const char *argv[])
 
         for (int index = 1; index < argc; index++) {
             if (!strcmp(argv[index], "--list")) { list_displays(); return 0; }
-            else if (!strcmp(argv[index], "--display") && index + 1 < argc)
-                display_index = atoi(argv[++index]);
+            else if (!strcmp(argv[index], "--display") && index + 1 < argc) {
+                const char *value = argv[++index];
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (!end || *end || parsed < 0) {
+                    fprintf(stderr, "\n'%s' is not a display index. Run --list.\n\n",
+                            value);
+                    return 2;
+                }
+                display_index = (int)parsed;
+            }
             else if (!strcmp(argv[index], "--hold") && index + 1 < argc)
                 hold_nits = atof(argv[++index]);
             else if (!strcmp(argv[index], "--no-metadata")) use_metadata = false;
@@ -256,7 +265,42 @@ int main(int argc, const char *argv[])
             printf("EDR metadata omitted (no tone mapping, per CAMetalLayer)\n");
         }
 
-        view.layer = layer;
+        if (sdr_mode) {
+            /* A positive control, and the reason this test can be trusted.
+             *
+             * The right half is an ordinary CoreAnimation layer with an
+             * sRGB-tagged background colour, which WindowServer definitely
+             * colour-manages. The left half is our Metal layer with a nil
+             * colorspace. Under a deliberately permuted display profile the
+             * two halves answer the question between them:
+             *
+             *   halves DIFFER   our layer is not colour-managed - the premise
+             *                   holds, and the control proves the profile was
+             *                   genuinely in the path
+             *   both WRONG      our layer is colour-managed too - the premise
+             *                   is wrong
+             *   both RIGHT      nothing is being colour-managed, so the
+             *                   profile never took. The test is invalid, not
+             *                   passing - re-check the assignment
+             *
+             * Without the control, "both right" and "halves differ" look
+             * identical from the left half alone. */
+            CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            CGFloat components[4] = {sdr_rgb[0] / 255.0, sdr_rgb[1] / 255.0,
+                                     sdr_rgb[2] / 255.0, 1.0};
+            CGColorRef control = CGColorCreate(srgb, components);
+            view.layer = [CALayer layer];
+            view.layer.backgroundColor = control;
+            CGColorRelease(control);
+            CGColorSpaceRelease(srgb);
+
+            CGRect half = view.bounds;
+            half.size.width /= 2.0;
+            layer.frame = half;
+            [view.layer addSublayer:layer];
+        } else {
+            view.layer = layer;
+        }
         view.metal = layer;
         window.contentView = view;
         [window makeKeyAndOrderFront:nil];
@@ -300,9 +344,14 @@ int main(int argc, const char *argv[])
         printf("\n");
         if (sdr_mode) {
             double r = sdr_rgb[0] / 255.0, g = sdr_rgb[1] / 255.0, b = sdr_rgb[2] / 255.0;
-            printf("filling with RGB(%d,%d,%d)\n", sdr_rgb[0], sdr_rgb[1], sdr_rgb[2]);
-            printf("If a permuted profile is assigned and this still looks like the\n"
-                   "colour you asked for, macOS is not converting our pixels.\n");
+            printf("LEFT  half: our Metal layer, colorspace nil (SDL's configuration)\n");
+            printf("RIGHT half: an ordinary sRGB-tagged layer, which macOS does manage\n");
+            printf("both filled with RGB(%d,%d,%d)\n\n",
+                   sdr_rgb[0], sdr_rgb[1], sdr_rgb[2]);
+            printf("With a permuted profile assigned to THIS display:\n");
+            printf("  halves differ     -> PASS, our pixels are not converted\n");
+            printf("  both look wrong   -> FAIL, our layer is colour-managed too\n");
+            printf("  both look right   -> INVALID, the profile is not in the path\n\n");
             printf("Press Return to exit.\n");
             for (int frame = 0; frame < 3; frame++) { present(r, g, b); pump(0.2); }
             getchar();

@@ -202,7 +202,31 @@ int main(int argc, const char *argv[])
                             "       %s restore <displayID>\n", argv[0], argv[0]);
             return 2;
         }
-        CGDirectDisplayID display = (CGDirectDisplayID)strtoul(argv[2], NULL, 0);
+        /* strtoul happily turns "0xNN" into 0, and CGDisplayCreateUUIDFromDisplayID(0)
+         * quietly resolves to the main display - so an unsubstituted placeholder
+         * would assign a profile to a display the operator never named. Refuse
+         * anything that is not a real, currently-online display id. */
+        char *parse_end = NULL;
+        unsigned long parsed = strtoul(argv[2], &parse_end, 0);
+        CGDirectDisplayID display = (CGDirectDisplayID)parsed;
+        if (!parse_end || *parse_end || parsed == 0) {
+            fprintf(stderr, "\n'%s' is not a display id. Run `%s list` and use one "
+                            "of the 0x... values shown there.\n\n", argv[2], argv[0]);
+            return 2;
+        }
+        {
+            CGDirectDisplayID online[32];
+            uint32_t count = 0, index;
+            bool known = false;
+            CGGetOnlineDisplayList(32, online, &count);
+            for (index = 0; index < count; index++)
+                if (online[index] == display) { known = true; break; }
+            if (!known) {
+                fprintf(stderr, "\nDisplay 0x%08x is not attached. Run `%s list`.\n\n",
+                        display, argv[0]);
+                return 2;
+            }
+        }
 
         if ([command isEqualToString:@"restore"]) {
             printf("\nbefore:\n"); report(display);
