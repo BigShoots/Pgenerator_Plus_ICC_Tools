@@ -180,6 +180,12 @@ int main(int argc, const char *argv[])
          * measure each configuration at the same physical spot, which turns a
          * judgement about colour into a chromaticity comparison. */
         int sdr_layout = 0;
+        /* Extended-linear (scRGB) mode. This is the path Apple actually
+         * intends for EDR, and the one SDL's Metal renderer already supports.
+         * 1.0 is SDR white by definition on Apple platforms, and values above
+         * it use the headroom - so if the response is linear in this value,
+         * absolute luminance is addressable without PQ ever being involved. */
+        double scrgb_value = -1.0;
         bool use_metadata = true;
         bool primaries_mode = false;
         double metadata_max = 1000.0, metadata_min = 0.005;
@@ -221,6 +227,8 @@ int main(int argc, const char *argv[])
             else if (!strcmp(argv[index], "--dwell") && index + 1 < argc)
                 dwell = atof(argv[++index]);
             else if (!strcmp(argv[index], "--primaries")) primaries_mode = true;
+            else if (!strcmp(argv[index], "--scrgb") && index + 1 < argc)
+                scrgb_value = atof(argv[++index]);
             else if (!strcmp(argv[index], "--sdr") && index + 1 < argc)
                 sscanf(argv[++index], "%d,%d,%d",
                        &sdr_rgb[0], &sdr_rgb[1], &sdr_rgb[2]);
@@ -303,13 +311,22 @@ int main(int argc, const char *argv[])
         ProbeView *view = [[ProbeView alloc] initWithFrame:screen.frame];
 
         bool sdr_mode = sdr_rgb[0] >= 0;
+        bool scrgb_mode = scrgb_value >= 0.0;
 
         CAMetalLayer *layer = [CAMetalLayer layer];
         layer.device = MTLCreateSystemDefaultDevice();
         layer.framebufferOnly = NO;
         layer.frame = view.bounds;
 
-        if (sdr_mode) {
+        if (scrgb_mode) {
+            /* Extended linear sRGB, float pixels, and NO EDR metadata.
+             * CAMetalLayer documents that as "samples will be rendered without
+             * tone mapping" - the one configuration the PQ sweeps never
+             * tested, because all three of those set metadata. */
+            layer.pixelFormat = MTLPixelFormatRGBA16Float;
+            layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+            layer.wantsExtendedDynamicRangeContent = YES;
+        } else if (sdr_mode) {
             /* Exactly how SDL configures its layer for an ordinary SDR window:
              * 8-bit BGRA and colorspace left nil. CAMetalLayer documents nil as
              * "no colormatching occurs", and this mode is here to confirm that
@@ -333,7 +350,11 @@ int main(int argc, const char *argv[])
          * current display characteristics. If nil, samples will be rendered
          * without tone mapping." Both are worth measuring - if they differ,
          * that difference IS the tone mapper. */
-        if (sdr_mode) {
+        if (scrgb_mode) {
+            layer.EDRMetadata = nil;
+            printf("scRGB mode: RGBA16Float, extended linear sRGB, NO EDR metadata\n");
+            printf("  (1.0 is SDR white by definition; above that uses headroom)\n");
+        } else if (sdr_mode) {
             layer.EDRMetadata = nil;
             printf("SDR mode: 8-bit BGRA, layer colorspace nil (SDL's configuration)\n");
         } else if (use_metadata) {
@@ -519,6 +540,27 @@ int main(int argc, const char *argv[])
         };
 
         printf("\n");
+        if (scrgb_mode) {
+            printf("presenting scRGB value %.4f\n", scrgb_value);
+            for (int frame = 0; frame < 3; frame++) {
+                present(scrgb_value, scrgb_value, scrgb_value); pump(0.2);
+            }
+            report_on_screen();
+            printf("EDR headroom while presenting: %.3f (potential %.3f, "
+                   "reference %.3f)\n",
+                   screen.maximumExtendedDynamicRangeColorComponentValue,
+                   screen.maximumPotentialExtendedDynamicRangeColorComponentValue,
+                   screen.maximumReferenceExtendedDynamicRangeColorComponentValue);
+            if (scrgb_value >
+                screen.maximumExtendedDynamicRangeColorComponentValue)
+                printf("WARNING: %.3f exceeds the current headroom, so it will "
+                       "clip.\n", scrgb_value);
+            fflush(stdout);
+            if (dwell > 0.0) { printf("holding for %.0fs\n", dwell); fflush(stdout); pump(dwell); }
+            else if (isatty(fileno(stdin))) { printf("press Return to exit.\n"); getchar(); }
+            else pump(30.0);
+            return 0;
+        }
         if (sdr_mode) {
             double r = sdr_rgb[0] / 255.0, g = sdr_rgb[1] / 255.0, b = sdr_rgb[2] / 255.0;
             if (sdr_layout == 0) {
@@ -563,9 +605,11 @@ int main(int argc, const char *argv[])
              * Only the live value says it is doing so now, and that is the
              * closest macOS gets to Windows' DXGI "the output is in HDR10 PQ".
              * A reading taken at headroom 1.0 is an SDR reading. */
-            printf("EDR headroom while presenting: %.3f (potential %.3f)\n",
+            printf("EDR headroom while presenting: %.3f (potential %.3f, "
+                   "reference %.3f)\n",
                    screen.maximumExtendedDynamicRangeColorComponentValue,
-                   screen.maximumPotentialExtendedDynamicRangeColorComponentValue);
+                   screen.maximumPotentialExtendedDynamicRangeColorComponentValue,
+                   screen.maximumReferenceExtendedDynamicRangeColorComponentValue);
             if (screen.maximumExtendedDynamicRangeColorComponentValue <= 1.0)
                 printf("WARNING: headroom is still 1.0 - this display is NOT "
                        "presenting extended range, so this is an SDR reading. "

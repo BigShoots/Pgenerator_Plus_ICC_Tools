@@ -7,7 +7,8 @@
 # hundred lines, worth writing only if macOS does not tone-map what we hand it.
 #
 #   ./run-experiment-2.sh --check <display-id>     verify meter and HDR, measure nothing
-#   ./run-experiment-2.sh <display-id> <label>     full sweep, results to CSV
+#   ./run-experiment-2.sh <display-id> <label>     PQ sweep, results to CSV
+#   ./run-experiment-2.sh --scrgb <id> <label>     extended-linear sweep
 #
 # Run the sweep three times, changing one thing each time:
 #
@@ -125,6 +126,85 @@ MSG
     else
         echo "  READY. Headroom $headroom. Run the sweep."
     fi
+    exit 0
+fi
+
+# ------------------------------------------------------------- scRGB sweep
+#
+# The path Apple actually intends for EDR, and the one the PQ sweeps never
+# tested. Extended linear sRGB, float pixels, NO EDR metadata - which
+# CAMetalLayer documents as "samples will be rendered without tone mapping".
+#
+# 1.0 is SDR white by definition. The question is whether measured luminance is
+# LINEAR in the value: if measured(v)/measured(1.0) == v across the range, then
+# absolute luminance is addressable by measuring SDR white once, and PQ never
+# needs to be involved. Run it at two brightness settings - the absolute values
+# will move because SDR white moves, but the normalised curve must not.
+if [ $# -ge 3 ] && [ "$1" = "--scrgb" ]; then
+    DISPLAY_ID=$2
+    LABEL=$3
+    check_meter || exit 1
+    OUT="scrgb-sweep-$LABEL.csv"
+    echo "value,measured_Y,x,y" > "$OUT"
+    echo
+    echo "scRGB sweep $LABEL  ->  $OUT"
+    printf "  %-8s %-12s %s\n" value measured "ratio to 1.0"
+    REF=""
+    for v in 0.125 0.25 0.5 1.0 1.5 2.0; do
+        log=$(mktemp)
+        ./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" --scrgb "$v" \
+            --dwell "$DWELL" >"$log" 2>&1 &
+        probe=$!
+        sleep 3
+        if ! kill -0 $probe 2>/dev/null; then
+            echo "  probe exited early:" >&2; sed 's/^/    /' "$log" >&2
+            rm -f "$log"; continue
+        fi
+        head=$(grep "EDR headroom while presenting" "$log" | sed -E 's/.*: ([0-9.]+) .*/\1/')
+        reading=$(read_meter)
+        kill $probe 2>/dev/null; wait $probe 2>/dev/null
+        rm -f "$log"
+        [ -z "$reading" ] && { echo "  $v: no reading" >&2; continue; }
+        set -- $reading
+        Y=$1; x=$2; y=$3
+        [ "$v" = "1.0" ] && REF=$Y
+        if [ -n "$REF" ]; then
+            ratio=$(python3 -c "print(f'{$Y/$REF:.3f}')")
+        else
+            ratio="-"
+        fi
+        printf "  %-8s %-12s %s\n" "$v" "$Y" "$ratio"
+        echo "$v,$Y,$x,$y" >> "$OUT"
+        HEADROOM=$head
+    done
+    echo
+    echo "headroom during the sweep: ${HEADROOM:-unknown}"
+    echo "wrote $OUT"
+    python3 - "$OUT" <<'SPY'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+ref = next((float(r["measured_Y"]) for r in rows if r["value"] == "1.0"), None)
+print()
+if not ref:
+    print("  no 1.0 reading, cannot normalise."); raise SystemExit
+print("  value   measured   measured/SDRwhite   expected   error")
+worst = 0.0
+for r in rows:
+    v, Y = float(r["value"]), float(r["measured_Y"])
+    got = Y / ref
+    err = abs(got - v) / v
+    if v <= 1.0:
+        worst = max(worst, err)
+    print(f"  {v:<7} {Y:<10.3f} {got:<19.3f} {v:<10} {err*100:>5.1f}%")
+print()
+print(f"  worst error at or below SDR white: {worst*100:.1f}%")
+if worst < 0.05:
+    print("  LINEAR below SDR white. Absolute luminance is addressable by")
+    print("  measuring SDR white once - no PQ, no tone mapper. Check the")
+    print("  above-1.0 rows against the headroom before trusting them.")
+else:
+    print("  NOT LINEAR even below SDR white, so this path is no better than PQ.")
+SPY
     exit 0
 fi
 
