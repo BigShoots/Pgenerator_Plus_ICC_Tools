@@ -131,17 +131,30 @@ Happy to send it over in whatever form is easiest.
 
 ---
 
-## Still checking, not ready to send
+## 8. Correction modes confirmed working — and one small residual
 
-**Whether `clut`/`matrix` round-trip on macOS.** Our first attempt was invalid —
-the clut patch never displayed (the Companion acked an error) so the meter read
-the same patch twice, and the analysis didn't catch it.
+We initially disagreed with your README's "macOS still composites through the
+assigned profile" on the strength of our own probe, and it turns out the probe
+was measuring the wrong thing (a bare `CAMetalLayer` with `colorspace = nil`,
+which is not what SDL presents). Your design is right, measured against your
+shipped v1.4.19 build:
 
-The one solid datum from that run: with the v1.4.19 build and a profile whose
-red and green colorants were swapped, **`system` mode measured the green
-primary for a red request** — so macOS did apply the profile transform to your
-patches, consistent with your README.
+With a profile whose red and green colorants were swapped assigned to the
+display, asking for red:
 
-That doesn't match what a bare `CAMetalLayer` with `colorspace = nil` does in
-the same situation, which suggests the answer depends on how the layer is
-configured rather than on macOS. Re-running before saying anything more.
+| mode | measured | |
+|---|---|---|
+| `system` | x 0.2888, y 0.6203 | green primary — the profile is applied |
+| `matrix` | x 0.5965, y 0.3739 | back to red — the inverse cancels it |
+
+`system` reproduced three times. Two small things you may find useful:
+
+- The matrix recovery is close but not exact — x 0.5965 against ~0.632 for the
+  panel's native red. Probably gamut clipping while driving one channel to
+  reproduce another under a deliberately absurd profile; noted in case a
+  subtler version shows up with real profiles.
+- `clut` on an Apple-generated display profile reports "The selected ICC
+  correction is not ready", correctly — those profiles are matrix/TRC with no
+  B2A0. A wording tweak ("this profile has no cLUT") might save a user some
+  confusion, since the current message reads like a transient state.
+

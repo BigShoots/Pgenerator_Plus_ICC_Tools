@@ -4208,62 +4208,42 @@ static void poll_server(void)
             wcsncpy(app.correction_profile_path,active_profile_path,SDL_arraysize(app.correction_profile_path)-1);
             app.correction_profile_path[SDL_arraysize(app.correction_profile_path)-1]=L'\0';
 #elif defined(PGEN_MACOS)
-            /* Application-managed correction cannot work on macOS, and saying
-             * so is the whole point of this branch.
+            /* macOS composites our patch window through the assigned ColorSync
+             * profile, so the application-managed modes work here exactly as
+             * they do on Windows and KWin: the Companion applies the profile's
+             * inverse and the compositor's forward transform cancels it.
              *
-             * The clut and matrix modes apply the active profile's inverse
-             * because the compositor is expected to apply the forward
-             * transform afterwards - that is what makes the pair cancel on
-             * Windows and KWin. macOS does not: the patch window's layer is
-             * untagged, so nothing converts our pixels, and applying the
-             * inverse alone would correct once in the wrong direction and
-             * quietly produce a plausible, wrong profile.
+             * Measured 2026-08-15 to be sure, because an earlier reading of
+             * this said the opposite. With a profile whose red and green
+             * colorants were swapped assigned to the display, asking for red
+             * gave x 0.2888 y 0.6203 in system mode - the green primary, so the
+             * transform is being applied - and x 0.5965 y 0.3739 in matrix
+             * mode, back to red. The round trip closes.
              *
-             * Refuse instead, the way the Linux build refuses to profile an
-             * SDR conversion when native HDR is unavailable. */
-            if (strcmp(app.correction_mode, "system") &&
-                strcmp(app.correction_mode, "none")) {
-                app.correction_ready = false;
-                SDL_Log("macOS: refusing %s correction. It applies the active "
-                        "profile's inverse expecting the compositor to apply the "
-                        "forward transform, and macOS applies neither, so the "
-                        "patches would be corrected once in the wrong direction.",
-                        app.correction_mode);
-                /* Kept under 128 bytes: that is the wire buffer for
-                 * transform_note, and a note truncated mid-word reads as a
-                 * bug rather than an explanation. */
-                SDL_snprintf(app.correction_error, sizeof(app.correction_error),
-                             "macOS applies no ICC conversion to this window, so "
-                             "%s correction would not cancel out. Use system or none.",
-                             app.correction_mode);
-                app.correction_lut_revision = settings_revision;
-                app.next_poll_ms = SDL_GetTicks() + 500;
-                return;
-            }
-            /* vcgt is loaded into the GPU transfer table after compositing, so
-             * unlike the ICC transform it does reach the patches. It is the one
-             * OS-side correction leaving the layer untagged cannot escape, and
-             * the operator has to know it is in the path. */
+             * The earlier conclusion came from a bare CAMetalLayer with
+             * colorspace nil, which is not what SDL presents here, and was
+             * wrongly written up as a property of macOS rather than of that
+             * configuration.
+             *
+             * vcgt still reaches the patches after compositing, so 'none' is
+             * refused while a non-identity one is loaded. */
             {
                 char vcgt_profile[256] = "";
-                if (pgen_macos_vcgt_is_active(app.selected_display_id,
+                if (!strcmp(app.correction_mode, "none") &&
+                    pgen_macos_vcgt_is_active(app.selected_display_id,
                                               vcgt_profile, sizeof(vcgt_profile))) {
-                    if (!strcmp(app.correction_mode, "none")) {
-                        app.correction_ready = false;
-                        SDL_Log("macOS: refusing 'none'. A non-identity vcgt from "
-                                "%s is loaded in the GPU transfer table, which is "
-                                "applied after compositing and so reaches the "
-                                "patches regardless.", vcgt_profile);
-                        SDL_strlcpy(app.correction_error,
-                                    "A non-identity vcgt is loaded in the GPU table, "
-                                    "which 'none' cannot cancel on macOS",
-                                    sizeof(app.correction_error));
-                        app.correction_lut_revision = settings_revision;
-                        app.next_poll_ms = SDL_GetTicks() + 500;
-                        return;
-                    }
-                    SDL_Log("macOS: vcgt from %s is active in the GPU transfer table",
+                    app.correction_ready = false;
+                    SDL_Log("macOS: refusing 'none'. A non-identity vcgt from %s "
+                            "is loaded in the GPU transfer table, which is applied "
+                            "after compositing and so reaches the patches.",
                             vcgt_profile);
+                    SDL_strlcpy(app.correction_error,
+                                "A non-identity vcgt is loaded in the GPU table, "
+                                "which 'none' cannot cancel on macOS",
+                                sizeof(app.correction_error));
+                    app.correction_lut_revision = settings_revision;
+                    app.next_poll_ms = SDL_GetTicks() + 500;
+                    return;
                 }
             }
 #else

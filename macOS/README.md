@@ -104,74 +104,37 @@ xattr -dr com.apple.quarantine /Applications/PGeneratorPlusPatchCompanion.app
 
 Three of these are real limits, not missing work.
 
-### macOS colour-manages the patch window in two stages, and we escape only one
+### macOS does composite the patch window through the assigned profile
 
-Measured on 2026-08-15 with an X-Rite i1 DisplayPro on an 8-bit ASUS VE228 over
-HDMI-to-DVI. Drift across the whole series was 0.0000, so these are stable and
-fully reversible.
+**Corrected 2026-08-15.** An earlier version of this file said the opposite and
+refused the cLUT and matrix correction modes on that basis. It was wrong.
 
-**Stage 1 — CoreAnimation colour matching. Our layer escapes this.** With a
-display profile whose red and green colorants were swapped, a nominal red
-measured:
+The mistake was measuring a bare `CAMetalLayer` with `colorspace = nil` — which
+is not what SDL presents — and writing the result up as a property of macOS
+rather than of that configuration. What the Companion actually shows *is*
+colour-managed.
 
-| | x | y |
+Measured against the shipped v1.4.19 build, with a display profile whose red and
+green colorants were swapped assigned to an ASUS VE228:
+
+| correction mode | measured | |
 |---|---|---|
-| our layer, colorspace nil | 0.5767 | 0.3898 |
-| sRGB-tagged control layer | 0.2893 | 0.6205 |
+| `system` | x 0.2888, y 0.6203 | the green primary — the swap is being applied |
+| `matrix` | x 0.5965, y 0.3739 | back to red — the inverse cancelled it |
 
-The control landed on the green primary. Ours did not. `CAMetalLayer` performs
-no colour matching while its `colorspace` is nil, and SDL leaves it nil for an
-ordinary SDR window, so this part behaves exactly as documented.
+So the application-managed modes work here exactly as on Windows and KWin: the
+Companion applies the profile's inverse, the compositor applies the forward
+transform, and the pair cancels. Repeated three times for `system`, always the
+green primary.
 
-**Stage 2 — a further, profile-derived transform. Our layer does NOT escape
-this.** Swapping only two bytes of the display profile — the `rXYZ` and `gXYZ`
-tag signatures, with every other byte identical — still moved our layer:
+The recovery is close but not exact — x 0.5965 against roughly 0.632 for this
+panel's own red — so something small remains unaccounted for. Gamut clipping
+while driving one channel to reproduce another is the obvious candidate, and it
+does not affect the direction of the result.
 
-| | own profile | swapped | delta |
-|---|---|---|---|
-| red | 0.6319, 0.3470 @ 24.55 cd/m² | 0.5799, 0.3870 @ 29.94 | 0.0656 |
-| white | 0.3110, 0.3310 @ 113.24 cd/m² | 0.2999, 0.3483 @ 122.83 | 0.0205 |
-
-White moving is the informative part: a neutral is invariant under a red/green
-colorant swap, since it sums the same three colorants either way. Both colours
-moved the same direction — greener and brighter — which is a per-channel drive
-change rather than a colorimetric conversion. White rising from 113 to 123 cd/m²
-means the panel was not being driven to full beforehand.
-
-A no-op control settles that this is caused by the profile's content and not by
-the act of assignment: re-assigning a byte-identical copy moved red by 0.0000
-and white by 0.0004.
-
-**What this means for profiling.** What the Companion puts on the panel is not
-independent of the assigned display profile. An earlier version of this file
-claimed patches "reach the panel as the code values we ask for"; that is too
-strong and has been retracted. A measurement made with one profile assigned does
-not describe the panel under another, so a profiling run has to control which
-profile is active — and record it.
-
-The mechanism is not yet characterised. Reproduce with
-`macOS/tools/run-experiment-1.sh`, which has `--vcgt` for the two-byte
-comparison and `--noop` for the control.
-
-### The cLUT and matrix correction modes are refused
-
-Those modes apply the active profile's inverse because the compositor is
-expected to apply the forward transform afterwards — that is what makes the
-pair cancel on Windows and KWin. macOS applies neither, so the inverse alone
-would correct once in the wrong direction and produce a plausible, wrong
-profile. The Companion refuses them and says why, rather than running them.
-
-Use `system` or `none`. `none` is additionally refused when a non-identity vcgt
-is loaded, because vcgt is applied after compositing and reaches the patches
-regardless — it is the one OS-side stage an untagged layer cannot escape.
-
-That second claim showed up in the measurement too. Our layer read x 0.6321
-under the panel's own profile and x 0.5767 under the permuted one — a real
-shift, even though the ICC transform demonstrably was not touching it. The
-permuted profile has vcgt stripped, so the GPU transfer table changed between
-the two readings. `run-experiment-1.sh --vcgt <id>` isolates this by swapping
-the colorants while leaving vcgt alone; with the GPU table held constant an
-unmanaged layer should not move at all.
+`none` is still refused while a non-identity vcgt is loaded: vcgt is applied
+after compositing and reaches the patches regardless, so that mode cannot mean
+what it says.
 
 ### One profile slot per display
 
