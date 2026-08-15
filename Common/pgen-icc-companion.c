@@ -3001,22 +3001,26 @@ static bool try_create_renderer(bool hdr, const char *driver)
     /* Refuse HDR here rather than letting SDL fail with "Unsupported output
      * colorspace", which says nothing useful to an operator.
      *
-     * Measured 2026-08-15 on an M1 Pro XDR panel: macOS tone-maps composited
-     * PQ content. The same codes measured 74% brighter with the SDR brightness
-     * slider moved from 50% to 100%, the response is non-monotonic near peak -
-     * a 600-nit target read 708 cd/m2 while a 1000-nit target read 559 - and
-     * changing the EDR mastering metadata moved the curve by up to 35%. None
-     * of that is compatible with characterising a display.
+     * Measured 2026-08-15 on an M1 Pro XDR panel. PQ is renormalised against
+     * SDR white whatever is done to it: the same codes measured up to 392%
+     * apart with only the brightness slider moved, non-monotonic near peak,
+     * and omitting the EDR metadata - which CAMetalLayer documents as
+     * disabling tone mapping - did not help.
      *
-     * This is the Linux build's precedent: refuse rather than silently profile
-     * a converted signal. */
+     * Extended linear DOES pass through: normalised to SDR white it is linear
+     * and agrees to 1.5% across a 17x change in that white. So HDR here is a
+     * matter of using SDL_COLORSPACE_SRGB_LINEAR, which SDL's Metal renderer
+     * already supports, and converting each PQ code to nits and then to a
+     * multiple of measured SDR white. Not yet implemented, hence the refusal -
+     * but the reason is "unimplemented", not "impossible". */
     if (hdr) {
-        SDL_SetError("Native HDR (PQ) output is not available on macOS. "
-                     "WindowServer tone-maps composited PQ content, and the "
-                     "mapping follows the display's brightness setting, so a "
-                     "measured HDR profile would describe the tone mapper "
-                     "rather than the display. Profile this display in SDR, or "
-                     "run the HDR series from the Windows or Linux Companion.");
+        SDL_SetError("HDR patches are not implemented on macOS yet. PQ cannot "
+                     "be used here - measurement shows macOS renormalises it "
+                     "against SDR white, with or without EDR metadata. The "
+                     "extended-linear path does work and is the intended "
+                     "implementation; until it lands, profile this display in "
+                     "SDR or run the HDR series from the Windows or Linux "
+                     "Companion.");
         return false;
     }
 #endif

@@ -13,7 +13,7 @@ platform guards; everything macOS-specific lives in this directory.
 | SDR profiling | works, verified end to end against a mock unit |
 | Code-value passthrough | **partial** — see below; the display profile still reaches the patches |
 | Install & Apply from the WebUI | works |
-| HDR (PQ) profiling | **not possible** — macOS tone-maps PQ; measured, see [HDR](#hdr) |
+| HDR profiling | **possible via scRGB**, not yet implemented — PQ measured dead, see [HDR](#hdr) |
 | Architecture | Apple Silicon (arm64) |
 | Signing | ad-hoc only — see [Gatekeeper](#gatekeeper) |
 
@@ -193,48 +193,72 @@ Build macOS profiles as SDR with VCGT.
 
 ## HDR
 
-Not supported, and now known to be impossible rather than merely unbuilt.
+**Possible, and not yet implemented.** An earlier version of this file said
+"impossible"; that was measured only on the PQ path and should not have been
+stated as a claim about macOS. Retracted.
 
-**Measured 2026-08-15**, M1 Pro XDR panel, i1 DisplayPro, PQ codes presented
-through a `CAMetalLayer` with `kCGColorSpaceITUR_2100_PQ` and extended dynamic
-range granted (live headroom 2.24). Same codes, three conditions:
+All measurements 2026-08-15, M1 Pro XDR panel, i1 DisplayPro.
 
-| target nits | A, slider 50% | B, slider 100% | B/A | C, metadata max 600 |
-|---|---|---|---|---|
-| 1 | 1.91 | 2.39 | 1.25 | 1.84 |
-| 10 | 14.63 | 21.12 | 1.44 | 14.34 |
-| 100 | 138.63 | 241.55 | **1.74** | 129.62 |
-| 203 | 275.17 | 465.41 | 1.69 | 257.56 |
-| 400 | 518.60 | 439.04 | 0.85 | 463.34 |
-| 600 | 707.53 | 542.94 | 0.77 | 459.80 |
-| 1000 | 559.39 | 572.84 | 1.02 | 532.37 |
+### PQ does not work, with or without metadata
 
-Every pass criterion fails:
+`CAMetalLayer` documents `EDRMetadata = nil` as rendering "without tone
+mapping", so that condition was run at two brightness settings:
 
-- **A vs B differ by up to 74%.** This is the decisive one. Nothing changed
-  between those runs except the SDR brightness slider. A passthrough cannot
-  depend on it; a tone-mapper must, because its map is a function of EDR
-  headroom and headroom follows that slider.
-- **Non-monotonic.** A 600-nit target measured 708 cd/m², a 1000-nit target
-  measured 559. Higher code, less light.
-- **Nowhere near the target.** Ratios run from 2.7× at 0.1 nits to 1.3× at 400.
-- **The mastering metadata changes the curve**, by up to 35% — so the content
-  is being interpreted, not passed through.
-- **Neutrality collapses at the top.** At the 1000-nit code, A measured
-  x 0.235, y 0.238 against a neutral near 0.31, 0.33.
+| target nits | D, slider 50% | E, slider 100% | E/D |
+|---|---|---|---|
+| 10 | 13.15 | 64.41 | 4.90 |
+| 50 | 66.33 | 326.68 | 4.92 |
+| 100 | 130.65 | 634.14 | 4.85 |
+| 600 | 715.41 | 592.21 | 0.83 |
 
-So an HDR profile built this way would characterise WindowServer's tone mapper
-under one particular brightness setting, not the display. The Companion refuses
-HDR runs with that explanation rather than producing one.
+Up to **392%** apart on nothing but the brightness slider, and non-monotonic at
+the top. Omitting the metadata does not help: PQ content is renormalised
+against SDR white regardless. Do not use PQ on macOS.
 
-This is not a gap that more work closes. SDL3's Metal renderer accepts only
-`SDL_COLORSPACE_SRGB` and `SDL_COLORSPACE_SRGB_LINEAR`, so PQ already needs a
-bespoke `CAMetalLayer` — and the measurement above was taken through exactly
-such a layer, configured the way an HDR build would configure it. There is no
-`IDXGIOutput6::GetDesc1().ColorSpace` equivalent to escape to.
+### Extended linear (scRGB) does work
 
-Reproduce with `macOS/tools/run-experiment-2.sh`, which refuses to report
-numbers unless the display is actually granting extended range.
+`kCGColorSpaceExtendedLinearSRGB`, `RGBA16Float`, no EDR metadata. 1.0 is SDR
+white by definition, so every reading is normalised against the 1.0
+measurement:
+
+| value | F normalised (SDR white 37.9 cd/m²) | G normalised (SDR white 631.2) | agreement |
+|---|---|---|---|
+| 0.125 | 0.127 | 0.129 | 1.5% |
+| 0.25 | 0.258 | 0.261 | 1.3% |
+| 0.5 | 0.511 | 0.518 | 1.4% |
+| 1.0 | 1.000 | 1.000 | — |
+| 1.5 | 1.509 | 1.074 | G clipped |
+| 2.0 | 2.011 | 0.921 | G clipped |
+
+**The normalised response is linear and agrees to 1.5% across a 17× change in
+SDR white.** That is passthrough. The small positive bias at low values has the
+signature of a black floor rather than nonlinearity, and a black floor is a
+display property to be measured, not an error.
+
+G's clipping is the panel, not the OS: the claimed headroom of 2.667 × 631 cd/m²
+implies 1683 cd/m², but full-field output tops out near 678. XDR panels are
+power-limited on full-field white. **Headroom overstates what a full-screen
+patch can actually reach**, so a run has to establish the real ceiling by
+measurement rather than trusting the reported figure.
+
+### What implementing it takes
+
+- `colorspace_for_hdr()` returns `SDL_COLORSPACE_SRGB_LINEAR` on macOS. SDL's
+  Metal renderer already supports that, so **no bespoke CAMetalLayer is needed**
+  — the earlier argument that PQ required one was correct, and irrelevant, since
+  PQ is not the path.
+- Convert each patch: PQ code → absolute nits via the ST 2084 EOTF → scRGB
+  value = nits ÷ SDR white in nits.
+- SDR white in nits is the one unknown. SDL reports it as 1.0 on Apple
+  platforms, which is a ratio, not a luminance. It has to be measured — and the
+  meter is already in the loop, so the natural answer is to present scRGB 1.0
+  at the start of a run and let PGenerator+ measure it.
+- Refuse, or mark as clipped, any patch whose absolute target exceeds the
+  measured full-field ceiling.
+
+Reproduce with `macOS/tools/run-experiment-2.sh`: `<id> <label>` for PQ,
+`--scrgb <id> <label>` for extended linear. Both refuse to report numbers
+unless the display is actually granting extended range.
 
 ## Parity with Windows and KDE
 
@@ -249,7 +273,7 @@ numbers unless the display is actually granting extended range.
 | Self-healing reassociation | yes | no | yes |
 | Separate SDR and HDR profile slots | yes | yes | **impossible** — one slot |
 | Application-managed cLUT/matrix correction | yes | yes | **impossible** — see above |
-| Native HDR (PQ) patches | yes, DXGI | yes, Wayland | **impossible** — macOS tone-maps PQ |
+| Native HDR patches | yes, DXGI PQ | yes, Wayland PQ | via scRGB, measured viable, unimplemented |
 | Autostart at login | yes | no | not yet |
 | Bundled ArgyllCMS `colprof` for build offload | yes | yes | not yet |
 
