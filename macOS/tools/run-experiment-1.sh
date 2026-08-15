@@ -202,16 +202,23 @@ AIMPY
     exit 0
 fi
 
-# Experiment 1b: isolate the two stages.
+# Experiment 1b: change one thing and nothing else.
 #
-# Experiment 1 showed our layer is not colour-managed, but its reading still
-# moved when the permuted profile was assigned - because that profile has vcgt
-# stripped, and vcgt is loaded into the GPU transfer table, which is applied
-# after compositing and so reaches even an unmanaged layer.
+# Experiment 1 showed our layer is not colour-managed the way the control is -
+# the control went fully to green, ours barely moved. But ours did move, and
+# two explanations for that have now been ruled out by measurement: it is not
+# the display profile reaching an unmanaged layer (impossible), and it is not
+# vcgt (holding vcgt constant did not stop it).
 #
-# This keeps vcgt and swaps only the colorants. If our layer now measures the
-# same under both profiles, the ICC transform demonstrably does not touch it
-# and the earlier shift was entirely the GPU table.
+# The remaining suspect is everything else those rebuilt profiles dropped -
+# Apple's private aarg/aabg/aagg parametric gamma tags in particular, which may
+# feed the GPU transfer table the way vcgt does. Rebuilding the profile at all
+# was the confound.
+#
+# So this uses --minimal: the source profile with exactly two bytes changed,
+# the rXYZ and gXYZ tag signatures. Same tags, same offsets, same payloads,
+# same length. If our layer does not move under that, the ICC colorants
+# demonstrably do not reach it and every earlier shift was the GPU path.
 if [ $# -ge 2 ] && [ "$1" = "--vcgt" ]; then
     check_meter || exit 1
     DISPLAY_ID=$2
@@ -238,15 +245,15 @@ if [ $# -ge 2 ] && [ "$1" = "--vcgt" ]; then
     BEFORE=$(measure_fill 255,0,0 before)
     echo "  ${BEFORE:-(none)}"
 
-    echo "building a permuted profile that KEEPS vcgt..."
+    echo "building a profile that differs by exactly two bytes..."
     python3 make-permuted-profile.py build "$ORIGINAL" /tmp/pgen-permuted-vcgt.icc \
-        --keep-vcgt >/dev/null || exit 1
+        --minimal || exit 1
     ./pgen-colorsync-probe assign "$DISPLAY_ID" /tmp/pgen-permuted-vcgt.icc >/dev/null \
         || { echo "assignment failed" >&2; exit 1; }
     ASSIGNED=1
     sleep 2
 
-    echo "measuring our layer with colorants swapped but vcgt unchanged..."
+    echo "measuring our layer with only the colorant tags swapped..."
     AFTER=$(measure_fill 255,0,0 after)
     echo "  ${AFTER:-(none)}"
 
@@ -270,15 +277,15 @@ print(f"  colorants swapped  x {ax:.4f}  y {ay:.4f}")
 print(f"  difference         {d:.4f} in xy")
 print()
 if d < 0.01:
-    print("  CONFIRMED. Swapping the colorants changed nothing, so the ICC")
-    print("  transform does not touch our layer at all. The shift seen in")
-    print("  Experiment 1 was the GPU transfer table, which vcgt-stripping")
-    print("  altered - and which does reach our patches. Both design claims")
-    print("  hold: refuse clut/matrix, and refuse 'none' when vcgt is active.")
+    print("  CONFIRMED. Two bytes of colorant change moved nothing, so the ICC")
+    print("  colorants do not reach our layer at all. Every earlier shift came")
+    print("  from rebuilding the profile - the dropped Apple gamma tags - which")
+    print("  is the GPU path, not the ICC path. The design holds.")
 else:
-    print("  UNEXPECTED. With vcgt held constant, swapping the colorants still")
-    print("  moved the reading, so something in the ICC path is reaching our")
-    print("  layer after all. Worth reporting with these numbers.")
+    print("  SIGNIFICANT. Two bytes of colorant change moved the reading, with")
+    print("  nothing else in the profile altered. Something in the ICC path")
+    print("  does reach our layer, and the correction-mode design needs")
+    print("  revisiting. Report these numbers.")
 VPY
     exit 0
 fi
