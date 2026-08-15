@@ -136,7 +136,7 @@ void pgen_macos_free(void *data);
  */
 bool pgen_macos_check_layer_passthrough(struct SDL_Window *window,
                                         unsigned int sdl_display_id,
-                                        char *note, size_t note_size);
+                                        bool hdr, char *note, size_t note_size);
 
 /* Whether a non-identity vcgt is loaded in the GPU transfer table for this
  * display. vcgt is applied after compositing, so unlike the ICC transform it

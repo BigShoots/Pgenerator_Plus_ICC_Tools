@@ -564,7 +564,7 @@ static CAMetalLayer *metal_layer_for_window(struct SDL_Window *window)
 
 bool pgen_macos_check_layer_passthrough(struct SDL_Window *window,
                                         unsigned int sdl_display_id,
-                                        char *note, size_t note_size)
+                                        bool hdr, char *note, size_t note_size)
 {
     (void)sdl_display_id;
     if (note && note_size) note[0] = '\0';
@@ -581,16 +581,53 @@ bool pgen_macos_check_layer_passthrough(struct SDL_Window *window,
             return false;
         }
 
+        if (hdr) {
+            /* The HDR path is extended linear by design - SDL tags the layer
+             * for it, and that tagging is what makes 1.0 mean SDR white. An
+             * untagged layer here would mean the scRGB surface never happened. */
+            CFStringRef name = layer.colorspace ? CGColorSpaceCopyName(layer.colorspace) : NULL;
+            NSString *label = name ? CFBridgingRelease(name) : nil;
+            bool linear = label && [label containsString:@"Linear"];
+            if (linear) {
+                SDL_Log("macOS: Metal layer is %s, the extended-linear surface "
+                        "the HDR path needs", label.UTF8String);
+                return true;
+            }
+            if (note)
+                snprintf(note, note_size,
+                         "HDR asked for an extended-linear surface but the layer "
+                         "is %s", label ? label.UTF8String : "untagged");
+            return false;
+        }
+
         if (layer.colorspace == NULL) {
             SDL_Log("macOS: Metal layer is untagged, so no colour matching is "
                     "applied and patches reach the panel as device values");
             return true;
         }
 
-        /* Tagged with something. If it happens to be the display's own space
-         * the match is an identity and the result is the same, so accept that
-         * rather than failing on a technicality. Anything else is a real
-         * conversion the Companion must not paper over. */
+        /* Tagged with something in SDR. One case is recoverable and common:
+         * after a failed HDR attempt SDL recreates the renderer with sRGB but
+         * does NOT clear the extended-linear colorspace it set for the scRGB
+         * surface, so the SDR fallback inherits it and every patch would be
+         * silently colour-managed. Clearing it restores exactly the state SDL
+         * leaves for an ordinary SDR window. */
+        {
+            CFStringRef stale = CGColorSpaceCopyName(layer.colorspace);
+            NSString *staleName = stale ? CFBridgingRelease(stale) : nil;
+            if (staleName && [staleName containsString:@"Linear"]) {
+                layer.colorspace = NULL;
+                SDL_Log("macOS: cleared a stale %s tag left on the layer by a "
+                        "failed HDR attempt; SDR patches would otherwise have "
+                        "been colour-managed", staleName.UTF8String);
+                return true;
+            }
+        }
+
+        /* If it happens to be the display's own space the match is an identity
+         * and the result is the same, so accept that rather than failing on a
+         * technicality. Anything else is a real conversion the Companion must
+         * not paper over. */
         CGColorSpaceRef display_space =
             CGDisplayCopyColorSpace(display_id_for_window(window));
         bool identity = display_space &&

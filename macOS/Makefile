@@ -121,6 +121,21 @@ define bundle
 	     -e 's|@NAME@|$(3)|g' Info.plist.in > "$(2)/Contents/Info.plist"
 	@if [ -f $(BUILD)/AppIcon.icns ]; then \
 	   cp $(BUILD)/AppIcon.icns "$(2)/Contents/Resources/"; fi
+	@# Carry SDL3 inside the bundle. Linked from Homebrew, the binary records
+	@# an absolute install name and will not start on a Mac without that exact
+	@# prefix - which is every Mac but the build machine. Copy the dylib in and
+	@# repoint the reference at the bundle. (A static SDL3, per the README,
+	@# removes this step entirely; this keeps the Homebrew build portable in
+	@# the meantime.)
+	@mkdir -p "$(2)/Contents/Frameworks"
+	@cp $(SDL_PREFIX)/lib/libSDL3.0.dylib "$(2)/Contents/Frameworks/"
+	@chmod u+w "$(2)/Contents/Frameworks/libSDL3.0.dylib"
+	@install_name_tool -change $(SDL_PREFIX)/lib/libSDL3.0.dylib \
+	   @executable_path/../Frameworks/libSDL3.0.dylib \
+	   "$(2)/Contents/MacOS/$(notdir $(1))" 2>/dev/null || true
+	@install_name_tool -id @executable_path/../Frameworks/libSDL3.0.dylib \
+	   "$(2)/Contents/Frameworks/libSDL3.0.dylib" 2>/dev/null || true
+	@codesign --force --sign - "$(2)/Contents/Frameworks/libSDL3.0.dylib" 2>/dev/null || true
 	@# The checkout lives in iCloud Drive, which stamps extended attributes on
 	@# every file it touches. codesign rejects those outright as "resource
 	@# fork, Finder information, or similar detritus", so clear them first.

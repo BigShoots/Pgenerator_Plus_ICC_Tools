@@ -3118,7 +3118,7 @@ static bool try_create_renderer(bool hdr, const char *driver)
      * to make with HDR. */
     app.passthrough_ready =
         pgen_macos_check_layer_passthrough(app.window, app.selected_display_id,
-                                           app.passthrough_note,
+                                           hdr, app.passthrough_note,
                                            sizeof(app.passthrough_note));
 #endif
 #ifdef PGEN_LINUX
