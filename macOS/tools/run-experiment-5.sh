@@ -155,9 +155,9 @@ done
 [ -n "$CLUT" ] || CLUT="|no mode was accepted"
 
 echo
-echo "what the Companion said about clut:"
-grep -iE "correction|clut|profile|macOS:" /tmp/pgen-clut-companion.log 2>/dev/null \
-    | tail -4 | sed 's/^/  /'
+echo "the Companion's last log lines:"
+tail -5 /tmp/pgen-clut-companion.log 2>/dev/null | sed 's/^/  /' \
+    || echo "  (nothing logged)"
 
 cleanup
 
