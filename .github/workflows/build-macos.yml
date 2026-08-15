@@ -81,28 +81,43 @@ jobs:
           (./profile/colprof 2>&1 || true) | grep -m1 Version
           (./profile/profcheck 2>&1 || true) | grep -m1 Version
 
+      - name: Build Profile Loader
+        run: |
+          SDL3_PREFIX="$(brew --prefix sdl3)"
+          clang -O2 -std=gnu11 -Wall -Wextra -Wno-unused-function -ILinux -ICommon \
+                -I"${SDL3_PREFIX}/include" \
+                macOS/pgen-profile-loader-macos.c \
+                -o PGenProfileLoader \
+                -L"${SDL3_PREFIX}/lib" -lSDL3 -lm \
+                -framework CoreGraphics -framework ColorSync -framework CoreFoundation
+          file PGenProfileLoader
+          file PGenProfileLoader | grep -q arm64
+
       - name: Bundle
         run: |
           mkdir bundle
-          cp PGenPatchCompanion bundle/
+          cp PGenPatchCompanion PGenProfileLoader bundle/
           # Point the Companion at the dylib beside it instead of the Homebrew
           # path, so no launcher script is needed. Rewriting the load command
           # invalidates the ad-hoc signature, so re-sign afterwards.
           SDL3_LINKED="$(otool -L bundle/PGenPatchCompanion | awk '/libSDL3/ {print $1; exit}')"
           test -n "${SDL3_LINKED}"
           cp "${SDL3_LINKED}" bundle/
-          install_name_tool -change "${SDL3_LINKED}" \
-                            "@loader_path/$(basename "${SDL3_LINKED}")" \
-                            bundle/PGenPatchCompanion
-          codesign --force --sign - bundle/PGenPatchCompanion
-          otool -L bundle/PGenPatchCompanion
-          otool -L bundle/PGenPatchCompanion | grep -q '@loader_path/libSDL3'
+          for binary in PGenPatchCompanion PGenProfileLoader; do
+            install_name_tool -change "${SDL3_LINKED}" \
+                              "@loader_path/$(basename "${SDL3_LINKED}")" \
+                              "bundle/${binary}"
+            codesign --force --sign - "bundle/${binary}"
+            otool -L "bundle/${binary}"
+            otool -L "bundle/${binary}" | grep -q '@loader_path/libSDL3'
+          done
           cp argyll/profile/colprof argyll/profile/profcheck bundle/
           cp licenses/SDL3-LICENSE.txt licenses/DejaVu-LICENSE.txt \
              licenses/ArgyllCMS-LICENSE.txt bundle/
           cp macOS/README.txt bundle/README.txt
           cp Common/PGenPatchCompanion.template.conf bundle/PGenPatchCompanion.conf
-          chmod +x bundle/PGenPatchCompanion bundle/colprof bundle/profcheck
+          chmod +x bundle/PGenPatchCompanion bundle/PGenProfileLoader \
+                   bundle/colprof bundle/profcheck
           (cd bundle && zip -X -r ../PGeneratorPlus-ICC-Tools-macOS-arm64.zip .)
           unzip -l PGeneratorPlus-ICC-Tools-macOS-arm64.zip
           # The native download format: a compressed disk image of the same

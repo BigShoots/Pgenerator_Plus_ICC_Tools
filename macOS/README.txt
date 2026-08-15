@@ -108,11 +108,22 @@ Correction modes on macOS
 Installing finished profiles
 ============================
 
-The Install & Apply button in the PGenerator+ Profile History is not
-available for macOS; there is no Profile Loader in this package. Download the
-finished ICC profile from the WebUI, copy it to ~/Library/ColorSync/Profiles,
-and assign it in System Settings > Displays > Color Profile (or with
-ColorSync Utility).
+PGenProfileLoader installs a finished profile and applies it to a display
+through ColorSync. Pick the display, pick the profile, and press Apply: the
+profile is installed into ~/Library/ColorSync/Profiles (no administrator
+rights are needed) and assigned as the display's profile. Verification
+compares the profile WindowServer is actually rendering with against the
+file, not just what the profile database recorded, and the loader reapplies
+the assignment if macOS drops it after a display reconfiguration.
+
+With Patch Companion connected, the Install & Apply button in the PGenerator+
+Profile History downloads the finished ICC and hands it to Profile Loader for
+the display showing patches, the same flow as Windows and Linux.
+
+macOS keeps a single ColorSync profile per display, so a profile assigned
+here governs SDR and HDR content alike. A profile whose calibration lives
+only in a Windows MHC2 tag leaves the display uncalibrated on macOS; build
+macOS profiles with VCGT calibration.
 
 Profile build offload
 =====================
