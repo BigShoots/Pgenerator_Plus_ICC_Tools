@@ -5,8 +5,23 @@
  * codes reach the operating-system HDR pipeline without scRGB remapping.
  */
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 #define _POSIX_C_SOURCE 200809L
+#endif
+/* Three platforms, two axes. PGEN_POSIX covers everything the BSD-socket,
+ * fork/exec and embedded-icon code needs, which macOS shares with Linux.
+ * PGEN_LINUX marks the parts that are specifically Wayland and KWin, so those
+ * stay out of the macOS build. Keeping the distinction in two macros rather
+ * than repeating the condition keeps this file's diff against upstream small.
+ */
+#ifndef _WIN32
+#define PGEN_POSIX 1
+#ifndef __APPLE__
+#define PGEN_LINUX 1
+#endif
+#endif
+#ifdef __APPLE__
+#define PGEN_MACOS 1
 #endif
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
@@ -70,8 +85,13 @@ typedef struct {
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef PGEN_LINUX
 #include <wayland-client.h>
 #include "pgen-color-management-v1-client-protocol.h"
+#endif
+#ifdef PGEN_MACOS
+#include "pgen-macos-color.h"
+#endif
 #define close_socket close
 typedef int socket_handle_t;
 #define INVALID_SOCKET_HANDLE (-1)
@@ -99,7 +119,7 @@ static int reap_profile_loader(void *opaque)
 #define RESPONSE_CAPACITY 32768
 #define PGEN_UNUSED __attribute__((unused))
 
-#ifndef _WIN32
+#ifdef PGEN_LINUX
 typedef struct {
     struct wl_display *display;
     struct wp_color_manager_v1 *manager;
@@ -459,7 +479,7 @@ static bool pgen_wayland_set_hdr_surface(SDL_Window *window, bool hdr,
     }
     return true;
 }
-#endif
+#endif /* PGEN_LINUX */
 /* PGenerator+ runs its own mDNS responder under this name, independent of
  * whatever mDNS stack the host OS may or may not have configured, so a plain
  * getaddrinfo() for it resolves on both Windows 10+ and Linux with
@@ -576,11 +596,23 @@ typedef struct {
 #ifndef _WIN32
     /* Full path of the profile KWin has assigned to the selected output, as of
      * the last poll. The correction stages read the file from here, the way the
-     * Windows build reads the path DXGI hands it. */
+     * Windows build reads the path DXGI hands it.
+     *
+     * macOS reuses these fields for the ColorSync profile assigned to the
+     * selected display. The name is upstream's; keeping it means the whole
+     * correction path below needs no macOS branch at all. */
     char linux_profile_path[1024];
     char linux_profile_connector[64];
     bool linux_profile_hdr;
     bool linux_forced_profile_passthrough;
+#endif
+#ifdef PGEN_MACOS
+    /* Whether the patch window's CAMetalLayer is tagged with the display's own
+     * colour space, so WindowServer's match is an identity. When this is false
+     * the patches are being converted on the way to the panel and the
+     * Companion must say so instead of claiming code-value accuracy. */
+    bool passthrough_ready;
+    char passthrough_note[192];
 #endif
     double source_r, source_g, source_b;
     double submitted_r, submitted_g, submitted_b;
@@ -2967,7 +2999,24 @@ static bool try_create_renderer(bool hdr, const char *driver)
     SDL_DestroyProperties(props);
     if (!app.renderer) return false;
     app.hdr = hdr;
-#ifndef _WIN32
+#ifdef PGEN_MACOS
+    /* macOS colour-manages every window, including SDR ones: SDL leaves the
+     * CAMetalLayer tagged sRGB, so WindowServer converts each patch into the
+     * display profile before it reaches the panel. Retag the layer with the
+     * display's own colour space so that match is an identity. This is the
+     * macOS counterpart of the Wayland surface description below - both exist
+     * to stop the compositor reinterpreting patch codes. */
+    if (!pgen_macos_set_layer_passthrough(app.window, app.selected_display_id,
+                                          app.passthrough_note,
+                                          sizeof(app.passthrough_note))) {
+        /* Not fatal: the Companion still runs, but it must not claim
+         * code-value accuracy. poll_server() reports the note verbatim. */
+        app.passthrough_ready = false;
+    } else {
+        app.passthrough_ready = true;
+    }
+#endif
+#ifdef PGEN_LINUX
     /* The Vulkan swapchain uses VK_COLOR_SPACE_PASS_THROUGH_EXT on Wayland,
      * leaving this application as the sole owner of the surface description.
      * Attach BT.2020/PQ before the first frame reaches KWin. */

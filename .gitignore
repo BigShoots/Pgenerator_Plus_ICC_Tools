@@ -30,3 +30,10 @@ SDL3-*/
 *.swp
 *~
 .DS_Store
+
+# macOS build outputs
+macOS/build/
+macOS/dist/
+*.app/
+*.dSYM/
+.DS_Store
