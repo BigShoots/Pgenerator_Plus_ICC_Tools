@@ -42,6 +42,15 @@ void pgen_macos_early_init(int argc, char *argv[]);
  * do not exist here. */
 const char *pgen_macos_platform_string(void);
 
+/* SDR white in cd/m2, from --sdr-white, or 0 when unknown.
+ *
+ * This is the one number the extended-linear HDR path needs and macOS will not
+ * supply: SDL reports SDR white as 1.0 on Apple platforms, which is a ratio,
+ * not a luminance. Measured 2026-08-15, the response is linear in multiples of
+ * it to 0.3% up to 4x, so one figure converts every patch. Until it is known,
+ * HDR is refused rather than guessed. */
+double pgen_macos_sdr_white_nits(void);
+
 /* What the OS currently reports for one display. The counterpart of
  * windows_active_profile() and kwin_output_state(). */
 typedef struct {

@@ -2589,6 +2589,29 @@ static void patch_to_sdr_linear(double r, double g, double b, float output[4])
     output[3] = 1.0f;
 }
 
+#ifdef PGEN_MACOS
+/* PQ code values to extended-linear scRGB.
+ *
+ * macOS renormalises PQ content against SDR white whatever is done to it - see
+ * the HDR section of macOS/README.md - so the codes cannot be handed over as
+ * PQ. Extended linear is the path that does pass through: 1.0 is SDR white by
+ * definition, and measurement puts the response within 0.3% of proportional up
+ * to 4x that, additive across channels to 0.5%, and reproducible to 0.1% when
+ * SDR white itself moves.
+ *
+ * So decode PQ to absolute nits and express that as a multiple of SDR white.
+ * Values beyond the display's headroom clip, which is the panel's limit rather
+ * than the pipeline's, and is why the caller reports the ceiling. */
+static void patch_to_scrgb(double r, double g, double b, double white_nits,
+                           float output[4])
+{
+    const double rgb[3] = {r, g, b};
+    for (int channel = 0; channel < 3; channel++)
+        output[channel] = (float)(pq_to_nits(rgb[channel]) / fmax(white_nits, 1e-6));
+    output[3] = 1.0f;
+}
+#endif
+
 static uint32_t patch_to_hdr10(double r, double g, double b)
 {
     uint32_t red = (uint32_t)lround(fmax(0.0, fmin(1.0, r)) * 1023.0);
@@ -2906,6 +2929,34 @@ static bool update_renderer_hdr_state(void)
      * false while the panel is genuinely being driven in HDR - the Companion
      * then reported "HDR inactive" for a display KWin lists as HDR: enabled.
      * The compositor's own view of the output settles it. */
+#ifdef PGEN_MACOS
+    /* The macOS HDR surface is extended linear, not PQ, so the HDR10 check
+     * below would reject a perfectly good one. What matters here instead is
+     * that the display is actually granting headroom: without it, every patch
+     * above SDR white silently clips and the run measures a ceiling rather
+     * than the display. */
+    if (app.hdr) {
+        float headroom = SDL_GetFloatProperty(renderer_props,
+                                              SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.0f);
+        if (output_colorspace != SDL_COLORSPACE_SRGB_LINEAR) {
+            SDL_SetError("Renderer %s did not give an extended-linear surface",
+                         app.renderer_name[0] ? app.renderer_name : "unknown");
+            app.hdr_active = false;
+            return false;
+        }
+        if (!isfinite(headroom) || headroom <= 1.0f) {
+            SDL_SetError("This display is not granting extended range - headroom "
+                         "is %.3f. Enable HDR for it, or pick a preset that "
+                         "supports it; every patch above SDR white would clip.",
+                         (double)headroom);
+            app.hdr_active = false;
+            return false;
+        }
+        app.hdr_active = true;
+        app.hdr_sdr_white_scale = 1.0f;
+        return SDL_SetRenderColorScale(app.renderer, 1.0f);
+    }
+#endif
     if (app.hdr && output_colorspace != SDL_COLORSPACE_HDR10) {
         SDL_SetError("Renderer %s returned colorspace 0x%08x instead of HDR10 PQ",
                      app.renderer_name[0] ? app.renderer_name : "unknown",
@@ -2948,8 +2999,15 @@ static SDL_Texture *create_patch_texture(bool hdr)
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_Texture *texture;
     if (!props) return NULL;
+#ifdef PGEN_MACOS
+    /* Float either way here: the macOS HDR path is extended linear, not the
+     * 10-bit PQ surface the other platforms use. */
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                          SDL_PIXELFORMAT_RGBA128_FLOAT);
+#else
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
                           hdr ? SDL_PIXELFORMAT_ABGR2101010 : SDL_PIXELFORMAT_RGBA128_FLOAT);
+#endif
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STREAMING);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, 1);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, 1);
@@ -2980,14 +3038,9 @@ static SDL_Colorspace colorspace_for_hdr(void)
 #ifdef _WIN32
     return SDL_COLORSPACE_SRGB_LINEAR;
 #elif defined(PGEN_MACOS)
-    /* There is no correct answer on macOS today. SDL's Metal renderer accepts
-     * only SDL_COLORSPACE_SRGB and SDL_COLORSPACE_SRGB_LINEAR and fails
-     * renderer creation for anything else, so PQ cannot come through this
-     * path at all; it would need a bespoke CAMetalLayer, the way Windows uses
-     * a bespoke DXGI swapchain. Returning HDR10 here would fail loudly at
-     * creation, which is the correct failure - the Companion must not fall
-     * back to an SDR conversion and profile that instead. */
-    return SDL_COLORSPACE_HDR10;
+    /* Extended linear, not PQ. SDL's Metal renderer supports this one, and
+     * measurement shows it passes through where PQ does not. */
+    return SDL_COLORSPACE_SRGB_LINEAR;
 #else
     return SDL_COLORSPACE_HDR10;
 #endif
@@ -3013,14 +3066,14 @@ static bool try_create_renderer(bool hdr, const char *driver)
      * already supports, and converting each PQ code to nits and then to a
      * multiple of measured SDR white. Not yet implemented, hence the refusal -
      * but the reason is "unimplemented", not "impossible". */
-    if (hdr) {
-        SDL_SetError("HDR patches are not implemented on macOS yet. PQ cannot "
-                     "be used here - measurement shows macOS renormalises it "
-                     "against SDR white, with or without EDR metadata. The "
-                     "extended-linear path does work and is the intended "
-                     "implementation; until it lands, profile this display in "
-                     "SDR or run the HDR series from the Windows or Linux "
-                     "Companion.");
+    if (hdr && pgen_macos_sdr_white_nits() <= 0.0) {
+        SDL_SetError("HDR on macOS needs this display's SDR white luminance, "
+                     "and macOS does not report it - SDL gives 1.0 on Apple "
+                     "platforms, which is a ratio rather than a luminance. "
+                     "Measure a full white patch and start the Companion with "
+                     "--sdr-white=<cd/m2>. Patches are then presented as "
+                     "multiples of it, which measurement shows macOS passes "
+                     "through; PQ is not usable here at all.");
         return false;
     }
 #endif
@@ -3142,9 +3195,16 @@ static bool try_create_renderer(bool hdr, const char *driver)
 static bool create_renderer(bool hdr)
 {
 #ifndef _WIN32
+#ifdef PGEN_MACOS
+    /* Metal is the only backend on macOS that offers an extended-linear
+     * surface, and asking for Vulkan here just produces a misleading "vulkan:"
+     * prefix on every failure. NULL is the platform default, which is Metal. */
+    const char *hdr_drivers[] = { NULL };
+#else
     /* Prefer Vulkan (the path proven on Kubuntu/KDE Wayland). Then SDL's GPU
      * backend, then the platform default. NULL must stay last. */
     const char *hdr_drivers[] = { "vulkan", "gpu", NULL };
+#endif
     size_t index;
     char attempt_error[256];
 #endif
@@ -3158,7 +3218,10 @@ static bool create_renderer(bool hdr)
 #else
     /* KWin only exposes an HDR-capable surface for some clients after the
      * window is fullscreen on an HDR output. Attempt that before creating the
-     * scRGB renderer so SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN can become true. */
+     * scRGB renderer so SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN can become true.
+     * macOS grants headroom without this, and forcing fullscreen before the
+     * operator has chosen it is worse than not. */
+#ifdef PGEN_LINUX
     {
         SDL_WindowFlags flags = SDL_GetWindowFlags(app.window);
         if ((flags & SDL_WINDOW_FULLSCREEN) == 0) {
@@ -3173,6 +3236,7 @@ static bool create_renderer(bool hdr)
         SDL_ShowWindow(app.window);
         SDL_RaiseWindow(app.window);
     }
+#endif /* PGEN_LINUX: the driver loop below is shared */
     for (index = 0; index < SDL_arraysize(hdr_drivers); index++) {
         const char *driver = hdr_drivers[index];
         char attempt_summary[320];
@@ -3307,6 +3371,20 @@ static bool render_patch(const char *mode, double r, double g, double b)
             return true;
         }
 #endif
+#ifdef PGEN_MACOS
+        {
+            double white = pgen_macos_sdr_white_nits();
+            patch_to_scrgb(r, g, b, white, pixel);
+            patch_to_scrgb(background_signal, background_signal, background_signal,
+                           white, background);
+            if (!SDL_UpdateTexture(app.texture, NULL, pixel, (int)sizeof(pixel)))
+                return false;
+            if (!SDL_UpdateTexture(app.background_texture, NULL, background,
+                                   (int)sizeof(background)))
+                return false;
+        }
+        goto macos_hdr_done;
+#endif
         /* PGenerator+ sends normalized HDR10 code values. Preserve them as
          * native 10-bit PQ/BT.2020 pixels without local PQ or roll-off math. */
         hdr_pixel = patch_to_hdr10(r, g, b);
@@ -3319,6 +3397,9 @@ static bool render_patch(const char *mode, double r, double g, double b)
         if (!SDL_UpdateTexture(app.texture, NULL, pixel, (int)sizeof(pixel))) return false;
         if (!SDL_UpdateTexture(app.background_texture, NULL, background, (int)sizeof(background))) return false;
     }
+#ifdef PGEN_MACOS
+macos_hdr_done:
+#endif
     if (!SDL_GetCurrentRenderOutputSize(app.renderer, &width, &height)) return false;
     destination.x = 0.0f;
     destination.y = 0.0f;
@@ -4047,13 +4128,32 @@ static void poll_server(void)
         } else {
             app.linux_profile_path[0] = '\0';
         }
-        /* "srgb" would be a lie here. SDL leaves the CAMetalLayer's colorspace
-         * nil, which CAMetalLayer documents as performing no colour matching,
-         * so what reaches the panel is device code values - not sRGB that the
-         * compositor then converts. Report the pipeline that actually ran. */
-        SDL_strlcpy(swapchain_color_space,
-                    app.passthrough_ready ? "device" : "device-unverified",
-                    sizeof(swapchain_color_space));
+        /* Report the pipeline that actually ran. In SDR "srgb" would be a lie:
+         * SDL leaves the CAMetalLayer's colorspace nil, which performs no
+         * colour matching, so device code values reach the panel rather than
+         * sRGB the compositor then converts. In HDR the surface is extended
+         * linear, and patches are multiples of measured SDR white. */
+        if (app.hdr) {
+            double white = pgen_macos_sdr_white_nits();
+            SDL_strlcpy(swapchain_color_space, "scrgb-linear",
+                        sizeof(swapchain_color_space));
+            if (white > 0.0) {
+                float headroom = 1.0f;
+                if (app.renderer)
+                    headroom = SDL_GetFloatProperty(SDL_GetRendererProperties(app.renderer),
+                                                    SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.0f);
+                if (!isfinite(headroom) || headroom < 1.0f) headroom = 1.0f;
+                /* The ceiling a full-field patch can actually reach. Reported
+                 * headroom overstates it on power-limited panels, so this is
+                 * an upper bound rather than a promise. */
+                output_maximum_luminance = white * headroom;
+                output_full_frame_luminance = output_maximum_luminance;
+            }
+        } else {
+            SDL_strlcpy(swapchain_color_space,
+                        app.passthrough_ready ? "device" : "device-unverified",
+                        sizeof(swapchain_color_space));
+        }
     }
 #endif
 #endif

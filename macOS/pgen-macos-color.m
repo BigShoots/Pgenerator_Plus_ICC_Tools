@@ -28,6 +28,7 @@
  * ------------------------------------------------------------------ */
 
 static char g_platform[16] = "macos";
+static double g_sdr_white_nits = 0.0;
 
 void pgen_macos_early_init(int argc, char *argv[])
 {
@@ -52,6 +53,20 @@ void pgen_macos_early_init(int argc, char *argv[])
         }
     }
 
+    for (int index = 1; index < argc; index++) {
+        const char *value = NULL;
+        if (!strncmp(argv[index], "--sdr-white=", 12)) value = argv[index] + 12;
+        else if (!strcmp(argv[index], "--sdr-white") && index + 1 < argc)
+            value = argv[++index];
+        if (!value) continue;
+        g_sdr_white_nits = atof(value);
+        if (g_sdr_white_nits > 0.0)
+            SDL_Log("macOS: SDR white taken as %.1f cd/m2; HDR patches will be "
+                    "presented as multiples of it", g_sdr_white_nits);
+        else
+            SDL_Log("macOS: ignoring --sdr-white=%s", value);
+    }
+
     /* Both hints must be set before the video subsystem starts.
      *
      * Spaces-based fullscreen is SDL's default on macOS and is wrong for a
@@ -66,6 +81,11 @@ void pgen_macos_early_init(int argc, char *argv[])
 const char *pgen_macos_platform_string(void)
 {
     return g_platform;
+}
+
+double pgen_macos_sdr_white_nits(void)
+{
+    return g_sdr_white_nits;
 }
 
 /* ------------------------------------------------------------------ *

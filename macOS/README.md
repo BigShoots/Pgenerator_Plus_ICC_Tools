@@ -254,14 +254,37 @@ power-limited on full-field white. **Headroom overstates what a full-screen
 patch can actually reach**, so a run has to establish the real ceiling by
 measurement rather than trusting the reported figure.
 
-### What implementing it takes
+### Using it
+
+```bash
+PGeneratorPlusPatchCompanion --sdr-white=150
+```
+
+`--sdr-white` is this display's SDR white in cd/m², measured with a full white
+patch. macOS will not supply it — SDL reports 1.0 on Apple platforms, which is
+a ratio rather than a luminance — so HDR is refused until it is given, rather
+than guessed at. Patches are then presented as multiples of it.
+
+Two refusals guard the path, and both are deliberate:
+
+- no `--sdr-white`, so there is nothing to convert against
+- the display is not granting extended range (headroom 1.0), in which case
+  every patch above SDR white would clip and the run would measure a ceiling
+  rather than a display
+
+Enable HDR for the display first, and re-measure SDR white whenever the
+brightness changes: it moves with the slider, and the conversion moves with it.
+
+### How it is implemented
 
 - `colorspace_for_hdr()` returns `SDL_COLORSPACE_SRGB_LINEAR` on macOS. SDL's
   Metal renderer already supports that, so **no bespoke CAMetalLayer is needed**
   — the earlier argument that PQ required one was correct, and irrelevant, since
   PQ is not the path.
-- Convert each patch: PQ code → absolute nits via the ST 2084 EOTF → scRGB
-  value = nits ÷ SDR white in nits.
+- Each patch is converted by `patch_to_scrgb()`: PQ code → absolute nits via
+  the ST 2084 EOTF → scRGB value = nits ÷ SDR white. The texture is float on
+  macOS whether or not the run is HDR, since extended linear needs it either
+  way.
 - SDR white in nits is the one unknown. SDL reports it as 1.0 on Apple
   platforms, which is a ratio, not a luminance. It has to be measured — and the
   meter is already in the loop, so the natural answer is to present scRGB 1.0
