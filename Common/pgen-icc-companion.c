@@ -2997,6 +2997,29 @@ static bool try_create_renderer(bool hdr, const char *driver)
 {
     SDL_PropertiesID props;
     uint64_t hdr_deadline;
+#ifdef PGEN_MACOS
+    /* Refuse HDR here rather than letting SDL fail with "Unsupported output
+     * colorspace", which says nothing useful to an operator.
+     *
+     * Measured 2026-08-15 on an M1 Pro XDR panel: macOS tone-maps composited
+     * PQ content. The same codes measured 74% brighter with the SDR brightness
+     * slider moved from 50% to 100%, the response is non-monotonic near peak -
+     * a 600-nit target read 708 cd/m2 while a 1000-nit target read 559 - and
+     * changing the EDR mastering metadata moved the curve by up to 35%. None
+     * of that is compatible with characterising a display.
+     *
+     * This is the Linux build's precedent: refuse rather than silently profile
+     * a converted signal. */
+    if (hdr) {
+        SDL_SetError("Native HDR (PQ) output is not available on macOS. "
+                     "WindowServer tone-maps composited PQ content, and the "
+                     "mapping follows the display's brightness setting, so a "
+                     "measured HDR profile would describe the tone mapper "
+                     "rather than the display. Profile this display in SDR, or "
+                     "run the HDR series from the Windows or Linux Companion.");
+        return false;
+    }
+#endif
     destroy_renderer();
     props = SDL_CreateProperties();
     if (!props) return false;

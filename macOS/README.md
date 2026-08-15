@@ -13,7 +13,7 @@ platform guards; everything macOS-specific lives in this directory.
 | SDR profiling | works, verified end to end against a mock unit |
 | Code-value passthrough | **partial** — see below; the display profile still reaches the patches |
 | Install & Apply from the WebUI | works |
-| HDR (PQ) profiling | **not supported** — see [HDR](#hdr) |
+| HDR (PQ) profiling | **not possible** — macOS tone-maps PQ; measured, see [HDR](#hdr) |
 | Architecture | Apple Silicon (arm64) |
 | Signing | ad-hoc only — see [Gatekeeper](#gatekeeper) |
 
@@ -193,22 +193,48 @@ Build macOS profiles as SDR with VCGT.
 
 ## HDR
 
-Not supported, and this is a limitation rather than an omission.
+Not supported, and now known to be impossible rather than merely unbuilt.
 
-SDL3's Metal renderer accepts only `SDL_COLORSPACE_SRGB` and
-`SDL_COLORSPACE_SRGB_LINEAR` and fails renderer creation for anything else, so
-PQ cannot come through the shared rendering path at all. It would need a
-bespoke `CAMetalLayer`, the way Windows uses a bespoke DXGI swapchain.
+**Measured 2026-08-15**, M1 Pro XDR panel, i1 DisplayPro, PQ codes presented
+through a `CAMetalLayer` with `kCGColorSpaceITUR_2100_PQ` and extended dynamic
+range granted (live headroom 2.24). Same codes, three conditions:
 
-Whether that would even work is an open question: macOS composites through EDR,
-where PQ 1.0 means 100 nits and WindowServer may tone-map, and there is no
-equivalent of `IDXGIOutput6::GetDesc1().ColorSpace` to *prove* native HDR is
-active. `macOS/tools/pgen-macos-hdr-probe.m` is the experiment that would
-settle it; it needs a colorimeter and an HDR display.
+| target nits | A, slider 50% | B, slider 100% | B/A | C, metadata max 600 |
+|---|---|---|---|---|
+| 1 | 1.91 | 2.39 | 1.25 | 1.84 |
+| 10 | 14.63 | 21.12 | 1.44 | 14.34 |
+| 100 | 138.63 | 241.55 | **1.74** | 129.62 |
+| 203 | 275.17 | 465.41 | 1.69 | 257.56 |
+| 400 | 518.60 | 439.04 | 0.85 | 463.34 |
+| 600 | 707.53 | 542.94 | 0.77 | 459.80 |
+| 1000 | 559.39 | 572.84 | 1.02 | 532.37 |
 
-Rather than silently profile a tone-mapped conversion, an HDR run fails. That
-is the same choice the Linux build makes when it cannot get a native HDR
-surface.
+Every pass criterion fails:
+
+- **A vs B differ by up to 74%.** This is the decisive one. Nothing changed
+  between those runs except the SDR brightness slider. A passthrough cannot
+  depend on it; a tone-mapper must, because its map is a function of EDR
+  headroom and headroom follows that slider.
+- **Non-monotonic.** A 600-nit target measured 708 cd/m², a 1000-nit target
+  measured 559. Higher code, less light.
+- **Nowhere near the target.** Ratios run from 2.7× at 0.1 nits to 1.3× at 400.
+- **The mastering metadata changes the curve**, by up to 35% — so the content
+  is being interpreted, not passed through.
+- **Neutrality collapses at the top.** At the 1000-nit code, A measured
+  x 0.235, y 0.238 against a neutral near 0.31, 0.33.
+
+So an HDR profile built this way would characterise WindowServer's tone mapper
+under one particular brightness setting, not the display. The Companion refuses
+HDR runs with that explanation rather than producing one.
+
+This is not a gap that more work closes. SDL3's Metal renderer accepts only
+`SDL_COLORSPACE_SRGB` and `SDL_COLORSPACE_SRGB_LINEAR`, so PQ already needs a
+bespoke `CAMetalLayer` — and the measurement above was taken through exactly
+such a layer, configured the way an HDR build would configure it. There is no
+`IDXGIOutput6::GetDesc1().ColorSpace` equivalent to escape to.
+
+Reproduce with `macOS/tools/run-experiment-2.sh`, which refuses to report
+numbers unless the display is actually granting extended range.
 
 ## Parity with Windows and KDE
 
@@ -223,7 +249,7 @@ surface.
 | Self-healing reassociation | yes | no | yes |
 | Separate SDR and HDR profile slots | yes | yes | **impossible** — one slot |
 | Application-managed cLUT/matrix correction | yes | yes | **impossible** — see above |
-| Native HDR (PQ) patches | yes, DXGI | yes, Wayland | not yet — see [HDR](#hdr) |
+| Native HDR (PQ) patches | yes, DXGI | yes, Wayland | **impossible** — macOS tone-maps PQ |
 | Autostart at login | yes | no | not yet |
 | Bundled ArgyllCMS `colprof` for build offload | yes | yes | not yet |
 
