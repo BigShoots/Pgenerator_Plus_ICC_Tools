@@ -92,6 +92,20 @@ DIFFERING=$(cmp -l "$ORIGINAL" "$PERMUTED" 2>/dev/null | wc -l | tr -d " ")
 [ "${DIFFERING:-0}" = "2" ] || { echo "  ABORTING: $DIFFERING bytes differ, not 2" >&2; exit 1; }
 echo "  verified: exactly 2 bytes differ"
 
+# clut evaluates a B2A0 cLUT. Apple's display profiles are matrix/TRC and have
+# none, so clut legitimately fails on them - which is what the first two runs of
+# this script actually recorded. matrix uses rXYZ/gXYZ/bXYZ plus the tone
+# curves, which is exactly what a colorant swap changes, so that is the mode
+# that tests the round trip here.
+HAS_CLUT=$(python3 make-permuted-profile.py inspect "$ORIGINAL" 2>/dev/null | grep -c "B2A0")
+if [ "${HAS_CLUT:-0}" = "0" ]; then
+    echo "  this profile is matrix/TRC with no B2A0 cLUT, so clut cannot apply;"
+    echo "  testing matrix, which is what a colorant swap exercises."
+    MODES="matrix clut"
+else
+    MODES="clut matrix"
+fi
+
 ./pgen-colorsync-probe assign "$DISPLAY_ID" "$PERMUTED" >/dev/null || {
     echo "assignment failed" >&2; exit 1; }
 ASSIGNED=1
@@ -129,9 +143,16 @@ echo "asking for RED with the swapped profile assigned:"
 SYS=$(measure_mode system)
 echo "  system : ${SYS%%|*}"
 echo "           [${SYS#*|}]"
-CLUT=$(measure_mode clut)
-echo "  clut   : ${CLUT%%|*}"
-echo "           [${CLUT#*|}]"
+CLUT=""
+for mode in $MODES; do
+    RESULT=$(measure_mode "$mode")
+    printf "  %-7s: %s\n" "$mode" "${RESULT%%|*}"
+    echo "           [${RESULT#*|}]"
+    case "${RESULT#*|}" in
+        *ack=ok*) [ -z "$CLUT" ] && CLUT=$RESULT ;;
+    esac
+done
+[ -n "$CLUT" ] || CLUT="|no mode was accepted"
 
 echo
 echo "what the Companion said about clut:"
@@ -151,8 +172,8 @@ if not sysr:
     print("  no system reading - nothing to compare against."); raise SystemExit(1)
 print(f"  system  Y {sysr[0]:8.3f}  x {sysr[1]:.4f}  y {sysr[2]:.4f}")
 if not clut:
-    print("  clut    no reading. If the Companion refused the mode, that is the")
-    print("          answer for that build - check the bracketed state above.")
+    print("  Neither correction mode was accepted, so there is nothing to")
+    print("  compare. The bracketed lines above carry the Companion's reason.")
     raise SystemExit(0)
 print(f"  clut    Y {clut[0]:8.3f}  x {clut[1]:.4f}  y {clut[2]:.4f}")
 print()
