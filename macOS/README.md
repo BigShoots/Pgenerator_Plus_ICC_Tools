@@ -231,9 +231,22 @@ measurement:
 | 2.0 | 2.011 | 0.921 | G clipped |
 
 **The normalised response is linear and agrees to 1.5% across a 17× change in
-SDR white.** That is passthrough. The small positive bias at low values has the
-signature of a black floor rather than nonlinearity, and a black floor is a
-display property to be measured, not an error.
+SDR white.** That is passthrough.
+
+Three further sweeps confirm it behaves like a display rather than merely
+tracking:
+
+- **Proportional to 0.3% up to 4× SDR white** (302 cd/m² measured), with no
+  ceiling reached. The clipping in G above was that panel's full-field power
+  limit at a much higher SDR white, not a limit of the path.
+- **Additive.** Measured XYZ(R) + XYZ(G) + XYZ(B) matched XYZ(white) to 0.5% at
+  value 1.0 and 1.5% at 0.5 — the assumption an ICC matrix profile rests on.
+- **Reproducible to 0.1%.** Two sweeps whose SDR white differed by exactly 2×
+  normalised to 0.127 / 0.258 / 0.511 and 0.127 / 0.258 / 0.512.
+
+That last point also settles the small deviation from ideal linearity at low
+values: it is identical run to run, so it is a fixed characteristic of the
+display, not noise — exactly the sort of thing a profile exists to record.
 
 G's clipping is the panel, not the OS: the claimed headroom of 2.667 × 631 cd/m²
 implies 1683 cd/m², but full-field output tops out near 678. XDR panels are
@@ -253,8 +266,14 @@ measurement rather than trusting the reported figure.
   platforms, which is a ratio, not a luminance. It has to be measured — and the
   meter is already in the loop, so the natural answer is to present scRGB 1.0
   at the start of a run and let PGenerator+ measure it.
+
+  There may be a shortcut: `AppleARMBacklight` publishes
+  `IODisplayParameters.BrightnessMilliNits` in the IORegistry, readable with no
+  privileges. If that tracks measured SDR white across brightness settings, the
+  conversion needs no meter. Untested — built-in panels only.
 - Refuse, or mark as clipped, any patch whose absolute target exceeds the
-  measured full-field ceiling.
+  measured full-field ceiling. The ceiling has to be measured; reported
+  headroom overstates it badly.
 
 Reproduce with `macOS/tools/run-experiment-2.sh`: `<id> <label>` for PQ,
 `--scrgb <id> <label>` for extended linear. Both refuse to report numbers

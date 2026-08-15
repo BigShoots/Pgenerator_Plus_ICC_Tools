@@ -179,8 +179,15 @@ if [ $# -ge 3 ] && [ "$1" = "--scrgb" ]; then
         echo "$v,$Y,$x,$y" >> "$OUT"
         HEADROOM=$head
     done
+    BACKLIGHT=$(./pgen-macos-hdr-probe --display-id "$DISPLAY_ID" --scrgb 0 --dwell 1 2>/dev/null \
+                | sed -n 's/^backlight *\([0-9.]*\) .*/\1/p' | head -1)
     echo
     echo "headroom during the sweep: ${HEADROOM:-unknown}"
+    if [ -n "$BACKLIGHT" ]; then
+        echo "backlight target (IORegistry): $BACKLIGHT cd/m2"
+        echo "  If this tracks the measured 1.0 value across brightness settings,"
+        echo "  the scRGB conversion needs no meter at all."
+    fi
     echo "wrote $OUT"
     python3 - "$OUT" <<'SPY'
 import csv, sys
