@@ -3988,14 +3988,17 @@ static void companion_run_install(const char *poll_response)
             _exit(127);
         }
         if (child > 0) {
-            SDL_Thread *reaper = SDL_CreateThread(reap_profile_loader,
-                                                  "profile-loader-reaper",
-                                                  (void *)(intptr_t)child);
-            if (reaper) SDL_DetachThread(reaper);
+            bool child_exited = false;
+            int child_status = 0;
             /* The loader writes "ok" or "error: <reason>" once ColorSync has
              * genuinely adopted (or refused) the profile - the same contract
              * the Windows loader uses, and the reason macOS does not need the
-             * compositor-polling loop Linux falls back on below. */
+             * compositor-polling loop Linux falls back on below.
+             *
+             * Watch the child as well as the file. A loader that dies without
+             * writing - a dyld failure, a crash, bad arguments - would
+             * otherwise turn an instantly diagnosable error into two minutes
+             * of silence while this loop waits out its full timeout. */
             for (int attempt = 0; attempt < 480; attempt++) {
                 FILE *result = fopen(result_path, "rb");
                 if (result) {
@@ -4005,10 +4008,45 @@ static void companion_run_install(const char *poll_response)
                     accepted = !strncmp(text, "ok", 2);
                     break;
                 }
+                if (waitpid(child, &child_status, WNOHANG) == child) {
+                    /* One last look: it may have written the file in its final
+                     * moments, after this iteration's check. */
+                    result = fopen(result_path, "rb");
+                    if (result) {
+                        char text[16] = "";
+                        fread(text, 1, sizeof(text) - 1, result);
+                        fclose(result);
+                        accepted = !strncmp(text, "ok", 2);
+                    }
+                    child_exited = true;
+                    break;
+                }
                 SDL_Delay(250);
             }
             remove(result_path);
-            if (!reaper) waitpid(child, NULL, WNOHANG);
+            if (child_exited && !accepted) {
+                if (WIFSIGNALED(child_status))
+                    SDL_Log("Profile Loader died on signal %d without reporting "
+                            "a result", WTERMSIG(child_status));
+                else
+                    SDL_Log("Profile Loader exited with status %d without "
+                            "reporting a result",
+                            WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1);
+                SDL_free(profile);
+                companion_report_install(job, false,
+                    "Profile Loader exited without reporting a result - it may "
+                    "be missing a library or incompatible with this system");
+                return;
+            }
+            if (!child_exited) {
+                /* Still running after a result or the timeout: reap it in the
+                 * background rather than leaving a zombie. */
+                SDL_Thread *reaper = SDL_CreateThread(reap_profile_loader,
+                                                      "profile-loader-reaper",
+                                                      (void *)(intptr_t)child);
+                if (reaper) SDL_DetachThread(reaper);
+                else waitpid(child, NULL, WNOHANG);
+            }
         }
     }
 #else
