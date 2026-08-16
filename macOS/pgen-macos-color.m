@@ -635,48 +635,60 @@ bool pgen_macos_check_layer_passthrough(struct SDL_Window *window,
             return false;
         }
 
-        if (layer.colorspace == NULL) {
-            SDL_Log("macOS: Metal layer is untagged, so no colour matching is "
-                    "applied and patches reach the panel as device values");
-            return true;
-        }
-
-        /* Tagged with something in SDR. One case is recoverable and common:
-         * after a failed HDR attempt SDL recreates the renderer with sRGB but
-         * does NOT clear the extended-linear colorspace it set for the scRGB
-         * surface, so the SDR fallback inherits it and every patch would be
-         * silently colour-managed. Clearing it restores exactly the state SDL
-         * leaves for an ordinary SDR window. */
-        {
-            CFStringRef stale = CGColorSpaceCopyName(layer.colorspace);
-            NSString *staleName = stale ? CFBridgingRelease(stale) : nil;
-            if (staleName && [staleName containsString:@"Linear"]) {
-                layer.colorspace = NULL;
-                SDL_Log("macOS: cleared a stale %s tag left on the layer by a "
-                        "failed HDR attempt; SDR patches would otherwise have "
-                        "been colour-managed", staleName.UTF8String);
-                return true;
-            }
-        }
-
-        /* If it happens to be the display's own space the match is an identity
-         * and the result is the same, so accept that rather than failing on a
-         * technicality. Anything else is a real conversion the Companion must
-         * not paper over. */
+        /* SDR. An untagged layer is NOT a passthrough, which is what this
+         * function used to assume and report: the compositor treats a nil
+         * colorspace as sRGB, so on a wide-gamut display every patch is
+         * quietly converted on its way to the panel.
+         *
+         * Measured on an Apple XDR (P3) with the layer untagged: red and green
+         * landed on the sRGB primaries, 0.6433/0.3400 and 0.2971/0.6045, where
+         * ArgyllCMS measured the display's native 0.6733/0.3267 and
+         * 0.2648/0.6921 through an identity transform. Blue agreed to four
+         * decimals - but only because sRGB and P3 share a blue primary, so the
+         * one channel that matched was the one that could not disagree.
+         *
+         * What does deliver device values is an identity conversion: tag the
+         * layer with the display's own profile so source and destination are
+         * the same and the transform collapses. That is the route that makes
+         * ArgyllCMS correct on this platform, and it also overwrites any
+         * extended-linear tag left behind by a failed HDR attempt. */
         CGColorSpaceRef display_space =
             CGDisplayCopyColorSpace(display_id_for_window(window));
-        bool identity = display_space &&
-                        CFEqual(layer.colorspace, display_space);
-        if (display_space) CGColorSpaceRelease(display_space);
+        if (!display_space) {
+            if (note)
+                snprintf(note, note_size,
+                         "macOS did not report a colour space for this display, "
+                         "so patches cannot be pinned to an identity transform");
+            return false;
+        }
+
+        if (layer.colorspace == NULL || !CFEqual(layer.colorspace, display_space)) {
+            CFStringRef had = layer.colorspace ? CGColorSpaceCopyName(layer.colorspace) : NULL;
+            NSString *hadName = had ? CFBridgingRelease(had) : nil;
+            layer.colorspace = display_space;
+            SDL_Log("macOS: tagged the Metal layer with the display's own "
+                    "colour space (was %s); the conversion is now an identity "
+                    "and patches reach the panel as device values",
+                    hadName ? hadName.UTF8String : "untagged");
+        }
+
+        /* Report what the layer is, not what was asked for. The previous
+         * version returned true on the strength of the attempt, which is how a
+         * silent sRGB conversion survived two measurement sessions. */
+        bool identity = layer.colorspace && CFEqual(layer.colorspace, display_space);
+        CGColorSpaceRelease(display_space);
         if (identity) return true;
 
-        CFStringRef name = CGColorSpaceCopyName(layer.colorspace);
-        NSString *label = name ? CFBridgingRelease(name) : @"an unnamed colour space";
-        if (note)
-            snprintf(note, note_size,
-                     "The patch window is tagged %s, so macOS is converting "
-                     "patches before they reach the panel", label.UTF8String);
-        SDL_Log("macOS: %s", note ? note : "layer is colour-managed");
+        {
+            CFStringRef name = layer.colorspace ? CGColorSpaceCopyName(layer.colorspace) : NULL;
+            NSString *label = name ? CFBridgingRelease(name) : @"an unnamed colour space";
+            if (note)
+                snprintf(note, note_size,
+                         "The patch window would not take the display's colour "
+                         "space and is tagged %s, so macOS is converting patches "
+                         "before they reach the panel", label.UTF8String);
+            SDL_Log("macOS: %s", note ? note : "layer is colour-managed");
+        }
         return false;
     }
 }

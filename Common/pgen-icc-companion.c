@@ -3131,16 +3131,17 @@ static bool try_create_renderer(bool hdr, const char *driver)
     if (!app.renderer) return false;
     app.hdr = hdr;
 #ifdef PGEN_MACOS
-    /* The macOS counterpart of the Wayland surface description below, except
-     * that macOS needs nothing arranged: CAMetalLayer performs no colour
-     * matching while its colorspace is nil, and SDL only sets that property
-     * for its scRGB path. Patches therefore reach the panel as device code
-     * values already.
+    /* The macOS counterpart of the Wayland surface description below, and it
+     * does need arranging. A CAMetalLayer with a nil colorspace is not a
+     * passthrough: the compositor reads it as sRGB, so on a wide-gamut display
+     * every patch is converted before it reaches the panel. Measured on an
+     * Apple XDR, an untagged layer put the primaries on sRGB rather than the
+     * display's P3.
      *
-     * Verify it anyway on every renderer creation. If a future SDL starts
-     * tagging the layer, the Companion would silently begin measuring a
-     * converted signal, which is exactly the failure the Linux build refuses
-     * to make with HDR. */
+     * What this arranges instead is an identity: the layer is tagged with the
+     * display's own colour space, so the conversion collapses and device code
+     * values arrive intact. Done on every renderer creation, because the layer
+     * goes with the renderer. */
     app.passthrough_ready =
         pgen_macos_check_layer_passthrough(app.window, app.selected_display_id,
                                            hdr, app.passthrough_note,
