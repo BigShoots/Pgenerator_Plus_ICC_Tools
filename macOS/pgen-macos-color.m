@@ -242,7 +242,7 @@ bool pgen_macos_preset_for_headroom(unsigned int sdl_display_id, double headroom
          * the same preset; the ratios themselves are far further apart than
          * that (1.00, 2.67, 10.00). */
         int matches = 0;
-        bool all_matches_tone_map_off = true;
+        bool saw_tone_mapping = false, saw_no_tone_mapping = false;
         for (int index = 0; index < total; index++) {
             CFDictionaryRef preset = copy_preset(display, index);
             if (!preset) continue;
@@ -252,7 +252,7 @@ bool pgen_macos_preset_for_headroom(unsigned int sdl_display_id, double headroom
                 double ratio = hdr / sdr;
                 if (fabs(ratio - headroom) <= fmax(0.01, headroom * 0.01)) {
                     bool disabled = preset_number(preset, CFSTR("PresetHostDisableHDRToneMapping"), 0.0) != 0.0;
-                    if (!disabled) all_matches_tone_map_off = false;
+                    if (disabled) saw_no_tone_mapping = true; else saw_tone_mapping = true;
                     if (matches == 0) {
                         CFStringRef name = CFDictionaryGetValue(preset, CFSTR("PresetName"));
                         if (name && CFGetTypeID(name) == CFStringGetTypeID())
@@ -272,13 +272,17 @@ bool pgen_macos_preset_for_headroom(unsigned int sdl_display_id, double headroom
         }
         if (matches == 0) return false;
         out->valid = true;
+        /* Only claim the tone-mapping answer when every preset sharing this
+         * headroom agrees. Nine share a ratio of 1.0 and they disagree - eight
+         * reference modes with it off, plus Apple Display (P3-600 nits) with it
+         * on - so that case is reported as unknown rather than guessed either
+         * way. Guessing "on" would warn everyone working correctly in
+         * Photography or sRGB and teach them to ignore it. */
+        out->tone_mapping_known = !(saw_tone_mapping && saw_no_tone_mapping);
         if (matches > 1) {
-            /* Several reference modes share a ratio of 1.0. The name is not
-             * knowable from headroom alone, but tone mapping is, which is the
-             * part that governs whether measuring here is sound. */
             out->ambiguous = true;
             out->name[0] = '\0';
-            out->tone_mapping = !all_matches_tone_map_off;
+            if (out->tone_mapping_known) out->tone_mapping = saw_tone_mapping;
         }
         return true;
     }

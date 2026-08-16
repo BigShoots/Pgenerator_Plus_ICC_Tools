@@ -84,13 +84,18 @@ bool pgen_macos_display_state(unsigned int sdl_display_id, PgenMacDisplay *out);
  * So the preset list is enumerated and the one whose ratio matches the
  * headroom SDL reports is the active one.
  *
- * A ratio of 1.0 is shared by several reference modes, so `name` may be empty
- * with `ambiguous` set - but every mode in that group has tone mapping off, so
- * the answer that matters is still definite. */
+ * A ratio of 1.0 is shared by nine presets, and they are NOT all alike: eight
+ * are reference modes with tone mapping off, but Apple Display (P3-600 nits)
+ * is 600/600 = 1.0 and tone-maps like the other general mode. So a headroom of
+ * 1.0 leaves the question genuinely open, and `tone_mapping_known` says so
+ * rather than guessing. Guessing "yes" would warn everyone working correctly in
+ * Photography, sRGB, Rec.709 or Digital Cinema, which teaches people to ignore
+ * the warning; guessing "no" would stay silent in a mode that tone-maps. */
 typedef struct {
     bool valid;              /* the preset table could be read at all */
     bool ambiguous;          /* several presets share this headroom ratio */
-    bool tone_mapping;       /* true when the preset leaves tone mapping ON */
+    bool tone_mapping_known; /* false when the matching group disagrees */
+    bool tone_mapping;       /* meaningful only when tone_mapping_known */
     char name[128];          /* preset name, empty when ambiguous */
     double white_x, white_y; /* the preset's own white point target */
     double max_sdr;          /* PresetMaxSDRLuminance, cd/m2 */

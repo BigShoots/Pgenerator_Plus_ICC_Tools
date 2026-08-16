@@ -4258,17 +4258,27 @@ static void poll_server(void)
                                                 SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.0f);
             if (!isfinite(headroom) || headroom < 1.0f) headroom = 1.0f;
             if (pgen_macos_preset_for_headroom(app.selected_display_id, headroom, &preset) &&
-                preset.valid && preset.tone_mapping && !transform_note[0]) {
-                if (preset.name[0])
+                preset.valid && !transform_note[0]) {
+                if (preset.tone_mapping_known && preset.tone_mapping && preset.name[0])
                     SDL_snprintf(transform_note, sizeof(transform_note),
                                  "%s applies HDR tone mapping, so patches are not "
                                  "measured as sent. Switch to a reference mode "
                                  "before profiling.", preset.name);
-                else
+                else if (preset.tone_mapping_known && preset.tone_mapping)
                     SDL_strlcpy(transform_note,
                                 "This display mode applies HDR tone mapping, so "
                                 "patches are not measured as sent. Switch to a "
                                 "reference mode before profiling.",
+                                sizeof(transform_note));
+                else if (!preset.tone_mapping_known)
+                    /* Say what is not known rather than guess. This display
+                     * mode is one of several that report the same headroom,
+                     * and they do not agree about tone mapping. */
+                    SDL_strlcpy(transform_note,
+                                "This display reports a headroom shared by "
+                                "several modes, one of which applies HDR tone "
+                                "mapping. Check the display preset before "
+                                "trusting a profile made here.",
                                 sizeof(transform_note));
             }
         }
