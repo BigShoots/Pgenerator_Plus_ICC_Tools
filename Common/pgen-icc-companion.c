@@ -4242,6 +4242,36 @@ static void poll_server(void)
                         app.passthrough_ready ? "device" : "device-unverified",
                         sizeof(swapchain_color_space));
         }
+        /* Which reference mode the display is in, and whether it tone-maps.
+         *
+         * Tone mapping is active in exactly the two general modes and off in
+         * every reference mode, and profiling through a tone mapper does not
+         * characterise the display. Measured on an XDR: white sat 0.047 from
+         * D65 in the general mode and 0.009 from it in a reference mode with
+         * nothing else changed. It is worth saying so before a run rather than
+         * leaving it to be discovered in the profile. */
+        {
+            PgenMacPreset preset;
+            float headroom = 1.0f;
+            if (app.renderer)
+                headroom = SDL_GetFloatProperty(SDL_GetRendererProperties(app.renderer),
+                                                SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.0f);
+            if (!isfinite(headroom) || headroom < 1.0f) headroom = 1.0f;
+            if (pgen_macos_preset_for_headroom(app.selected_display_id, headroom, &preset) &&
+                preset.valid && preset.tone_mapping && !transform_note[0]) {
+                if (preset.name[0])
+                    SDL_snprintf(transform_note, sizeof(transform_note),
+                                 "%s applies HDR tone mapping, so patches are not "
+                                 "measured as sent. Switch to a reference mode "
+                                 "before profiling.", preset.name);
+                else
+                    SDL_strlcpy(transform_note,
+                                "This display mode applies HDR tone mapping, so "
+                                "patches are not measured as sent. Switch to a "
+                                "reference mode before profiling.",
+                                sizeof(transform_note));
+            }
+        }
     }
 #endif
 #endif

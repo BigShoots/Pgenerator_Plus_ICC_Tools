@@ -68,6 +68,42 @@ typedef struct {
  * ColorSync state. Returns false when the display cannot be matched. */
 bool pgen_macos_display_state(unsigned int sdl_display_id, PgenMacDisplay *out);
 
+/* Which display preset ("reference mode") is in use, and what it promises.
+ *
+ * This matters more than it looks. Tone mapping is active in exactly the two
+ * general modes and off in every reference mode, and a measurement taken
+ * through a tone mapper is not a measurement of the display. Measured on an
+ * XDR: white sat 0.047 from D65 in the general mode and 0.009 from it in a
+ * reference mode, with nothing else changed.
+ *
+ * macOS has no public API for this, and the private call that looks like it
+ * should answer it (CoreDisplay_Display_CopyPresetUniqueID) returned a stale
+ * answer in testing. What does work is arithmetic: reported EDR headroom is
+ * exactly max_hdr/max_sdr for the active preset - 2.67x for Apple XDR Display
+ * (P3-1600 nits), 10.00x for HDR Video (P3-ST 2084), matched exactly on both.
+ * So the preset list is enumerated and the one whose ratio matches the
+ * headroom SDL reports is the active one.
+ *
+ * A ratio of 1.0 is shared by several reference modes, so `name` may be empty
+ * with `ambiguous` set - but every mode in that group has tone mapping off, so
+ * the answer that matters is still definite. */
+typedef struct {
+    bool valid;              /* the preset table could be read at all */
+    bool ambiguous;          /* several presets share this headroom ratio */
+    bool tone_mapping;       /* true when the preset leaves tone mapping ON */
+    char name[128];          /* preset name, empty when ambiguous */
+    double white_x, white_y; /* the preset's own white point target */
+    double max_sdr;          /* PresetMaxSDRLuminance, cd/m2 */
+    double max_hdr;          /* PresetMaxHDRLuminance, cd/m2 */
+    double gamma;            /* PresetPurePowerGamma, 0 when absent */
+} PgenMacPreset;
+
+/* Identify the active preset from the headroom SDL reports for this display.
+ * Pass the value of SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT. Returns false when
+ * the preset table cannot be read, in which case nothing is claimed. */
+bool pgen_macos_preset_for_headroom(unsigned int sdl_display_id, double headroom,
+                                    PgenMacPreset *out);
+
 /* ---- Profile Loader side -------------------------------------------- *
  * The Companion only ever reads. These are the write half, used by the macOS
  * Profile Loader, and they are what replaces kscreen-doctor and colormgr.

@@ -20,6 +20,7 @@
 
 #include <SDL3/SDL.h>
 #include <string.h>
+#include <dlfcn.h>
 
 #include "pgen-macos-color.h"
 
@@ -180,6 +181,107 @@ static NSURL *registered_profile_url(CGDirectDisplayID display)
         if ([url isKindOfClass:NSURL.class]) return url;
     }
     return nil;
+}
+
+/* ---- display presets ------------------------------------------------ *
+ *
+ * The preset table is private API, so it is reached through dlsym rather than
+ * linked. A macOS that drops these symbols then costs us the preset report and
+ * nothing else; linking them would cost us the whole binary.
+ */
+typedef CFDictionaryRef (*PgenCopyPresetFn)(CGDirectDisplayID, int);
+typedef int (*PgenPresetCountFn)(CGDirectDisplayID);
+
+static double preset_number(CFDictionaryRef preset, CFStringRef key, double fallback)
+{
+    /* The table mixes types and the flags are booleans, not 0/1 numbers -
+     * reading PresetHostDisableHDRToneMapping as a number silently yields the
+     * fallback, which inverts the tone-mapping answer. Accept all three. */
+    CFTypeRef value = preset ? CFDictionaryGetValue(preset, key) : NULL;
+    if (!value) return fallback;
+    if (CFGetTypeID(value) == CFBooleanGetTypeID())
+        return CFBooleanGetValue((CFBooleanRef)value) ? 1.0 : 0.0;
+    if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+        double out = fallback;
+        return CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, &out) ? out : fallback;
+    }
+    if (CFGetTypeID(value) == CFStringGetTypeID())
+        return CFStringGetDoubleValue((CFStringRef)value);
+    return fallback;
+}
+
+bool pgen_macos_preset_for_headroom(unsigned int sdl_display_id, double headroom,
+                                    PgenMacPreset *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+
+    @autoreleasepool {
+        CGDirectDisplayID display = display_id_for_sdl_display((SDL_DisplayID)sdl_display_id);
+        if (!display) return false;
+
+        static PgenCopyPresetFn copy_preset = NULL;
+        static PgenPresetCountFn preset_count = NULL;
+        static bool resolved = false;
+        if (!resolved) {
+            void *handle = dlopen("/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay",
+                                  RTLD_LAZY | RTLD_LOCAL);
+            if (handle) {
+                copy_preset = (PgenCopyPresetFn)dlsym(handle, "CoreDisplay_Display_CopyPreset");
+                preset_count = (PgenPresetCountFn)dlsym(handle, "CoreDisplay_Display_GetPresetCount");
+            }
+            resolved = true;
+        }
+        if (!copy_preset || !preset_count) return false;
+
+        int total = preset_count(display);
+        if (total <= 0 || total > 512) return false;
+
+        /* Reported headroom is max_hdr/max_sdr for the active preset, matched
+         * exactly on both modes measured. Anything within a percent of that is
+         * the same preset; the ratios themselves are far further apart than
+         * that (1.00, 2.67, 10.00). */
+        int matches = 0;
+        bool all_matches_tone_map_off = true;
+        for (int index = 0; index < total; index++) {
+            CFDictionaryRef preset = copy_preset(display, index);
+            if (!preset) continue;
+            double sdr = preset_number(preset, CFSTR("PresetMaxSDRLuminance"), 0.0);
+            double hdr = preset_number(preset, CFSTR("PresetMaxHDRLuminance"), 0.0);
+            if (sdr > 0.0 && hdr > 0.0) {
+                double ratio = hdr / sdr;
+                if (fabs(ratio - headroom) <= fmax(0.01, headroom * 0.01)) {
+                    bool disabled = preset_number(preset, CFSTR("PresetHostDisableHDRToneMapping"), 0.0) != 0.0;
+                    if (!disabled) all_matches_tone_map_off = false;
+                    if (matches == 0) {
+                        CFStringRef name = CFDictionaryGetValue(preset, CFSTR("PresetName"));
+                        if (name && CFGetTypeID(name) == CFStringGetTypeID())
+                            CFStringGetCString(name, out->name, sizeof(out->name),
+                                               kCFStringEncodingUTF8);
+                        out->white_x = preset_number(preset, CFSTR("PresetCustomWhitePointX"), 0.0);
+                        out->white_y = preset_number(preset, CFSTR("PresetCustomWhitePointY"), 0.0);
+                        out->max_sdr = sdr;
+                        out->max_hdr = hdr;
+                        out->gamma = preset_number(preset, CFSTR("PresetPurePowerGamma"), 0.0);
+                        out->tone_mapping = !disabled;
+                    }
+                    matches++;
+                }
+            }
+            CFRelease(preset);
+        }
+        if (matches == 0) return false;
+        out->valid = true;
+        if (matches > 1) {
+            /* Several reference modes share a ratio of 1.0. The name is not
+             * knowable from headroom alone, but tone mapping is, which is the
+             * part that governs whether measuring here is sound. */
+            out->ambiguous = true;
+            out->name[0] = '\0';
+            out->tone_mapping = !all_matches_tone_map_off;
+        }
+        return true;
+    }
 }
 
 bool pgen_macos_display_state(unsigned int sdl_display_id, PgenMacDisplay *out)
