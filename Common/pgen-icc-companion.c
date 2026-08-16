@@ -5203,16 +5203,31 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         render_current_frame();
     }
     if (event->type == SDL_EVENT_KEY_DOWN) {
-        if (event->key.key == SDLK_ESCAPE) return SDL_APP_SUCCESS;
-        if (event->key.key == SDLK_F11) {
 #ifdef _WIN32
-            bool fullscreen = !state->fullscreen;
+        bool is_fullscreen = state->fullscreen;
 #else
-            SDL_WindowFlags flags = SDL_GetWindowFlags(state->window);
-            bool fullscreen = (flags & SDL_WINDOW_FULLSCREEN) == 0;
+        bool is_fullscreen = (SDL_GetWindowFlags(state->window) & SDL_WINDOW_FULLSCREEN) != 0;
 #endif
-            apply_display_settings(fullscreen, state->displayed_size);
+        /* Escape leaves fullscreen before it quits.
+         *
+         * It used to quit outright, which is the wrong end of the only two
+         * things Escape could plausibly mean here: someone who has just lost
+         * their whole screen to a patch window reaches for Escape to get out
+         * of it, not to kill the Companion in the middle of a series. Quitting
+         * stays available from a window, where nothing is covered and it is
+         * unambiguous. */
+        if (event->key.key == SDLK_ESCAPE) {
+            if (!is_fullscreen) return SDL_APP_SUCCESS;
+            apply_display_settings(false, state->displayed_size);
+            return SDL_APP_CONTINUE;
         }
+        /* F11 is the cross-platform toggle, but on a Mac keyboard it usually
+         * needs Fn and often belongs to the window manager, so accept the
+         * platform-conventional chord as well. No on-screen hint: anything
+         * drawn over a patch would be measured with it. */
+        if (event->key.key == SDLK_F11 ||
+            (event->key.key == SDLK_F && (event->key.mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL))))
+            apply_display_settings(!is_fullscreen, state->displayed_size);
     }
     if (event->type == SDL_EVENT_WINDOW_EXPOSED ||
         event->type == SDL_EVENT_WINDOW_FOCUS_GAINED ||
