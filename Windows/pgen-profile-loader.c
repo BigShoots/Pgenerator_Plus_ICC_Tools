@@ -324,12 +324,67 @@ static BOOL profile_contains_hdr_cicp(const WCHAR *path) {
     return FALSE;
 }
 
+/* The MHC2 tag stores its calibrated peak as s15Fixed16 cd/m2 at offset 16,
+   after the signature, four reserved bytes, the entry count and the minimum
+   luminance. */
+static double profile_mhc2_peak_luminance(const WCHAR *path) {
+    HANDLE file;
+    BYTE header[132];
+    DWORD got = 0, count, i;
+    LARGE_INTEGER size;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0.0;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 132 ||
+        !ReadFile(file, header, sizeof(header), &got, NULL) || got != sizeof(header)) {
+        CloseHandle(file);
+        return 0.0;
+    }
+    count = read_be32(header + 128);
+    for (i = 0; i < count && i < 4096; i++) {
+        BYTE tag[12], payload[20];
+        LARGE_INTEGER position;
+        uint32_t offset, tag_size, raw;
+        position.QuadPart = 132ULL + (uint64_t)i * 12ULL;
+        if (!SetFilePointerEx(file, position, NULL, FILE_BEGIN) ||
+            !ReadFile(file, tag, sizeof(tag), &got, NULL) || got != sizeof(tag)) break;
+        if (memcmp(tag, "MHC2", 4) != 0) continue;
+        offset = read_be32(tag + 4);
+        tag_size = read_be32(tag + 8);
+        position.QuadPart = offset;
+        if (tag_size < sizeof(payload) || offset + sizeof(payload) > (uint64_t)size.QuadPart ||
+            !SetFilePointerEx(file, position, NULL, FILE_BEGIN) ||
+            !ReadFile(file, payload, sizeof(payload), &got, NULL) || got != sizeof(payload)) break;
+        CloseHandle(file);
+        if (memcmp(payload, "MHC2", 4) != 0) return 0.0;
+        raw = read_be32(payload + 16);
+        return (raw >= 0x80000000u ? (double)raw - 4294967296.0 : (double)raw) / 65536.0;
+    }
+    CloseHandle(file);
+    return 0.0;
+}
+
 static BOOL profile_name_is_hdr(const WCHAR *path) {
     WCHAR upper[MAX_PATH];
     size_t i;
     wcsncpy_s(upper, MAX_PATH, path, _TRUNCATE);
     for (i = 0; upper[i]; i++) upper[i] = towupper(upper[i]);
     return wcsstr(upper, L"HDR-MHC2") != NULL || wcsstr(upper, L"-HDR-") != NULL;
+}
+
+/* STANDARD versus EXTENDED is a property of the display association, not of
+   the ICC payload. A non-MHC2 HDR profile still belongs in Windows' EXTENDED
+   (HDR) association list; requiring MHC2 here made Windows show every HDR
+   cLUT-only profile as an SDR profile. Classify from the content, because a
+   renamed profile still has to reach the right list: cicp marks HDR
+   authoritatively, and an MHC2 profile without cicp is HDR when its
+   calibrated peak clears the SDR range (measured across this project's
+   profiles: SDR 152-168 cd/m2, HDR 299-999). The file name is the last
+   resort, for profiles carrying neither tag. */
+static BOOL profile_is_hdr_association(const WCHAR *path) {
+    return profile_contains_hdr_cicp(path) ||
+           profile_mhc2_peak_luminance(path) >= 250.0 ||
+           profile_name_is_hdr(path);
 }
 
 static void make_ini_path(void) {
@@ -365,7 +420,7 @@ static void load_settings(void) {
         /* Reclassify saved profiles too. Older loader builds persisted a
            non-MHC2 HDR selection as STANDARD, so trusting that old INI bit
            would keep restoring it to Windows' SDR association list. */
-        g_associate_advanced = profile_name_is_hdr(g_profile_path);
+        g_associate_advanced = profile_is_hdr_association(g_profile_path);
     }
 }
 
@@ -873,7 +928,7 @@ static void append_display_profile_name(const WCHAR *name, BOOL advanced) {
     wcsncpy_s(entry->name, MAX_PATH, profile_basename(name), _TRUNCATE);
     entry->advanced = advanced ||
                       (installed_profile_path(entry->name, path, MAX_PATH) &&
-                       profile_contains_mhc2(path));
+                       profile_is_hdr_association(path));
 }
 
 static void append_display_profile_registry(DISPLAY_ENTRY *display) {
@@ -1111,12 +1166,7 @@ static BOOL apply_profile(BOOL interactive) {
         }
     }
     g_profile_has_mhc2 = profile_contains_mhc2(g_profile_path);
-    /* STANDARD versus EXTENDED is a property of the display association, not
-       of the ICC payload. A non-MHC2 HDR profile still belongs in Windows'
-       EXTENDED (HDR) association list; requiring MHC2 here made Windows show
-       every HDR cLUT-only profile as an SDR profile. */
-    g_associate_advanced = profile_name_is_hdr(g_profile_path) ||
-                           profile_contains_hdr_cicp(g_profile_path);
+    g_associate_advanced = profile_is_hdr_association(g_profile_path);
     /* Do this before the already-active shortcut. A profile may be present in
        the per-user WCS association list even though Color Management is still
        configured to ignore that list. */
@@ -1281,7 +1331,7 @@ static void apply_companion_command(const WCHAR *command) {
         return;
     }
     g_browse_has_mhc2 = profile_contains_mhc2(profile);
-    g_browse_advanced = profile_name_is_hdr(profile);
+    g_browse_advanced = profile_is_hdr_association(profile);
     accept_profile_path(profile);
     start_apply_profile();
 }
@@ -1387,7 +1437,7 @@ static DWORD WINAPI choose_profile_thread(LPVOID unused) {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
     if (GetOpenFileNameW(&ofn)) {
         g_browse_has_mhc2 = profile_contains_mhc2(g_browse_path);
-        g_browse_advanced = profile_name_is_hdr(g_browse_path);
+        g_browse_advanced = profile_is_hdr_association(g_browse_path);
         PostMessageW(g_window, WM_BROWSE_DONE, 1, 0);
     } else {
         PostMessageW(g_window, WM_BROWSE_DONE, 0, 0);
