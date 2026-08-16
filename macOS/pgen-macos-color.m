@@ -419,6 +419,32 @@ bool pgen_macos_install_profile(const char *source_path,
     }
 }
 
+/* Whether a display can be assigned this file at all.
+ *
+ * ColorSync builds a CGColorSpace from whatever it is handed and SkyLight
+ * asserts that the result is RGB, so handing it anything else does not fail
+ * the call - it aborts the process, with no error path to report through. A
+ * stock macOS install is full of candidates: /Library/ColorSync/Profiles opens
+ * with six abstract Lab tone profiles, and the system directory carries Gray,
+ * CMYK, Lab, XYZ and named-colour ones beside the RGB displays.
+ *
+ * Screening is by ICC header, which settles it in 24 bytes: a display device
+ * class carrying RGB data. */
+bool pgen_macos_profile_is_assignable(const char *icc_path)
+{
+    unsigned char header[24];
+    FILE *handle;
+    size_t got;
+    if (!icc_path || !icc_path[0]) return false;
+    handle = fopen(icc_path, "rb");
+    if (!handle) return false;
+    got = fread(header, 1, sizeof(header), handle);
+    fclose(handle);
+    if (got != sizeof(header)) return false;
+    return memcmp(header + 12, "mntr", 4) == 0 &&
+           memcmp(header + 16, "RGB ", 4) == 0;
+}
+
 bool pgen_macos_assign_profile(const char *display_uuid, const char *icc_path,
                                char *message, size_t message_size)
 {
@@ -429,6 +455,15 @@ bool pgen_macos_assign_profile(const char *display_uuid, const char *icc_path,
         if (!display) {
             if (message) snprintf(message, message_size,
                                   "That display is no longer attached.");
+            return false;
+        }
+        /* NULL is the documented revert-to-factory path and stays allowed; a
+         * named file has to survive the screen above, because the failure mode
+         * below this line is an abort rather than a return. */
+        if (icc_path && icc_path[0] && !pgen_macos_profile_is_assignable(icc_path)) {
+            if (message) snprintf(message, message_size,
+                                  "That file is not an RGB display profile, so "
+                                  "macOS cannot assign it to a display.");
             return false;
         }
         CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display);

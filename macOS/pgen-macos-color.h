@@ -78,6 +78,12 @@ bool pgen_macos_display_state(unsigned int sdl_display_id, PgenMacDisplay *out);
  * fallback to arrange - ColorSync is always present. */
 int pgen_macos_enumerate_displays(PgenMacDisplay *out, int capacity);
 
+/* Whether a display can be assigned this file at all: a display-class ICC
+ * carrying RGB data. ColorSync aborts the process rather than returning an
+ * error when handed anything else, so callers screen with this before offering
+ * a profile or assigning one. */
+bool pgen_macos_profile_is_assignable(const char *icc_path);
+
 /* Assign a profile to a display, keyed by the UUID from PgenMacDisplay. Pass
  * NULL for icc_path to fall back to the display's factory profile, which is
  * the documented kCFNull path and the macOS equivalent of clearing.
