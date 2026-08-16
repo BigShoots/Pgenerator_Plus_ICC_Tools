@@ -461,6 +461,7 @@ static void save_settings(void) {
 }
 
 static void load_settings(void) {
+    int association;
     GetPrivateProfileStringW(L"ProfileLoader", L"ProfilePath", L"", g_profile_path,
                              MAX_PATH, g_ini);
     GetPrivateProfileStringW(L"ProfileLoader", L"ProfileName", L"", g_profile_name,
@@ -472,10 +473,18 @@ static void load_settings(void) {
     g_associate_advanced = GetPrivateProfileIntW(L"ProfileLoader", L"AdvancedAssociation", 0, g_ini) != 0;
     if (GetFileAttributesW(g_profile_path) != INVALID_FILE_ATTRIBUTES) {
         g_profile_has_mhc2 = profile_contains_mhc2(g_profile_path);
-        /* Reclassify saved profiles too. Older loader builds persisted a
-           non-MHC2 HDR selection as STANDARD, so trusting that old INI bit
-           would keep restoring it to Windows' SDR association list. */
-        g_associate_advanced = profile_is_hdr_association(g_profile_path);
+        /* Explicit builder markers remain authoritative. Otherwise upgrade a
+           saved STANDARD selection when the profile content or name proves it
+           is HDR, but preserve an existing Advanced Color selection for an
+           ambiguous vendor profile. Such profiles can carry no MHC2, cicp or
+           HDR token even though Windows already associated them with the HDR
+           display mode. Downgrading the saved bit makes auto-reapply move the
+           vendor profile into the SDR list after every loader restart. */
+        association = profile_association_marker(g_profile_path);
+        if (association != PGEN_ASSOCIATION_UNKNOWN)
+            g_associate_advanced = association == PGEN_ASSOCIATION_HDR;
+        else if (profile_is_hdr_association(g_profile_path))
+            g_associate_advanced = TRUE;
     }
 }
 
