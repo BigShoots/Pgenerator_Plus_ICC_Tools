@@ -131,6 +131,12 @@ typedef struct {
     int profile_scroll;
 
     char selected_profile[1024];
+    /* What this loader actually put on a display, and which display it went to.
+     * Distinct from selected_profile, which is only what the list is pointing
+     * at - including the entry preselected at startup, which nobody asked for.
+     * The self-healer defends this and nothing else. */
+    char applied_profile[1024];
+    char applied_display[256];
 
     SDL_Mutex *lock;
     SDL_Thread *worker;
@@ -326,6 +332,32 @@ static void pgen_macos_user_profile_directory(char *out, size_t out_size)
                  home && home[0] ? home : ".");
 }
 
+/* Whether a display can be assigned this file at all.
+ *
+ * ColorSync builds a CGColorSpace from whatever it is handed and SkyLight
+ * asserts that the result is RGB, so handing it anything else does not fail
+ * the call - it aborts the process, with no error path to report. A stock
+ * macOS install is full of candidates: /Library/ColorSync/Profiles opens with
+ * six abstract Lab tone profiles, and the system directory carries Gray, CMYK,
+ * Lab, XYZ and named-colour ones beside the RGB displays.
+ *
+ * Screening is by ICC header, which settles it in 24 bytes: a display device
+ * class carrying RGB data. */
+static bool pgen_macos_profile_is_assignable(const char *icc_path)
+{
+    unsigned char header[24];
+    FILE *handle;
+    size_t got;
+    if (!icc_path || !icc_path[0]) return false;
+    handle = fopen(icc_path, "rb");
+    if (!handle) return false;
+    got = fread(header, 1, sizeof(header), handle);
+    fclose(handle);
+    if (got != sizeof(header)) return false;
+    return memcmp(header + 12, "mntr", 4) == 0 &&
+           memcmp(header + 16, "RGB ", 4) == 0;
+}
+
 /* Assign a profile as the display's custom default, or fall back to the
  * factory profile when icc_path is NULL - the documented kCFNull path. The
  * dictionary shape is the flat one SetCustomProfiles takes: ProfileID to
@@ -343,6 +375,15 @@ static bool pgen_macos_assign_profile(const char *display_uuid, const char *icc_
     if (!display) {
         if (message) SDL_strlcpy(message, "That display is no longer attached.",
                                  message_size);
+        return false;
+    }
+    /* NULL is the documented revert-to-factory path and stays allowed; a named
+     * file has to survive the screen above, because the failure mode below
+     * this line is an abort rather than a return. */
+    if (icc_path && icc_path[0] && !pgen_macos_profile_is_assignable(icc_path)) {
+        if (message) SDL_strlcpy(message, "That file is not an RGB display "
+                                 "profile, so macOS cannot assign it to a "
+                                 "display.", message_size);
         return false;
     }
     uuid = CGDisplayCreateUUIDFromDisplayID(display);
@@ -648,6 +689,10 @@ static void add_profile(const char *directory, const char *name)
         if (!strcmp(app.profiles[index].path, entry->path) ||
             !SDL_strcasecmp(app.profiles[index].name, name)) return;
     if (access(entry->path, R_OK) != 0) return;
+    /* Offer only what a display can actually be given. The stock profile
+     * directories are mostly abstract, Gray, CMYK and Lab files, and listing
+     * one invites a click that would take the process down with it. */
+    if (!pgen_macos_profile_is_assignable(entry->path)) return;
     SDL_strlcpy(entry->name, name, sizeof(entry->name));
     entry->has_mhc2 = profile_contains_mhc2(entry->path);
     entry->kind = classify_profile(entry->path, entry->has_mhc2);
@@ -1069,6 +1114,10 @@ static void action_apply(void)
                    "for it, so there is nothing to apply the profile to.");
         return;
     }
+    /* From here the assignment is ours, and the self-healer has something it
+     * is entitled to defend. */
+    SDL_strlcpy(app.applied_profile, app.selected_profile, sizeof(app.applied_profile));
+    SDL_strlcpy(app.applied_display, display->name, sizeof(app.applied_display));
     refresh_everything();
     display = selected_display();
     if (display && profile_kind_is_hdr(kind) && !display->hdr) {
@@ -1096,6 +1145,12 @@ static void action_clear(void)
     DisplayEntry *display = selected_display();
     char message[768] = "";
     if (!display) return;
+    /* Clearing withdraws the claim as well as the profile - otherwise the
+     * self-healer would put back what was just deliberately removed. */
+    if (app.applied_display[0] && !strcmp(app.applied_display, display->name)) {
+        app.applied_profile[0] = '\0';
+        app.applied_display[0] = '\0';
+    }
     if (display->from_kwin && app.have_kscreen) {
         ProfileKind active_kind = display->hdr ? PROFILE_KIND_KDE_HDR : PROFILE_KIND_SDR;
         if (!apply_with_kwin(display, "", active_kind, message, sizeof(message))) {
@@ -2437,18 +2492,29 @@ static void write_companion_result(void)
  * being healed. */
 static void maybe_self_heal(void)
 {
-    DisplayEntry *display;
+    DisplayEntry *display = NULL;
     uint64_t now = SDL_GetTicks();
     char message[512] = "";
 
     if (!app.auto_reapply || app.silent_apply) return;
-    if (!app.selected_profile[0]) return;
+    /* Only an assignment this loader made. Keying this to the list selection
+     * instead made the startup preselection - the first profile found in a
+     * scan of the system directories - look like a dropped assignment, and the
+     * healer would push it onto the display seconds after launch, calibration
+     * nobody requested. */
+    if (!app.applied_profile[0] || !app.applied_display[0]) return;
     if (app.reapply_failures >= 3) return;
 
-    display = selected_display();
+    /* The display it was applied to, not whichever one the list is showing. */
+    for (int index = 0; index < app.display_count; index++) {
+        if (!strcmp(app.displays[index].name, app.applied_display)) {
+            display = &app.displays[index];
+            break;
+        }
+    }
     if (!display) return;
 
-    if (pgen_macos_windowserver_uses(display->name, app.selected_profile)) {
+    if (pgen_macos_windowserver_uses(display->name, app.applied_profile)) {
         app.mismatch_count = 0;
         app.reapply_attempted = false;
         app.reapply_failures = 0;
@@ -2465,15 +2531,15 @@ static void maybe_self_heal(void)
 
     /* Reassociate only. Never reinstall from the timer - the file is already
      * where it belongs, and reinstalling would be a write nobody asked for. */
-    if (pgen_macos_assign_profile(display->name, app.selected_profile,
+    if (pgen_macos_assign_profile(display->name, app.applied_profile,
                                   message, sizeof(message))) {
         SDL_Log("macOS: reapplied %s to %s after %d consecutive mismatches",
-                app.selected_profile, display->model, app.mismatch_count);
+                app.applied_profile, display->model, app.mismatch_count);
         app.mismatch_count = 0;
     } else {
         app.reapply_failures++;
         SDL_Log("macOS: could not reapply %s to %s (attempt %d of 3): %s",
-                app.selected_profile, display->model, app.reapply_failures,
+                app.applied_profile, display->model, app.reapply_failures,
                 message[0] ? message : "no detail reported");
         if (app.reapply_failures >= 3)
             set_status(STATUS_BAD, "REAPPLY GAVE UP",
