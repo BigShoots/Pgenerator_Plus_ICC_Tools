@@ -364,6 +364,58 @@ static double profile_mhc2_peak_luminance(const WCHAR *path) {
     return 0.0;
 }
 
+#define PGEN_ASSOCIATION_UNKNOWN 0
+#define PGEN_ASSOCIATION_SDR 1
+#define PGEN_ASSOCIATION_HDR 2
+
+/* PGenerator+ Windows profiles carry a private text tag naming the per-user
+   display association they were built for. Unknown ICC tags are ignored by
+   colour engines, while this positive marker avoids guessing from MHC2 peak
+   luminance. A bright SDR display can legitimately exceed a dim HDR display. */
+static int profile_association_marker(const WCHAR *path) {
+    HANDLE file;
+    BYTE header[132];
+    DWORD got = 0, count, i;
+    LARGE_INTEGER size;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return PGEN_ASSOCIATION_UNKNOWN;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 132 ||
+        !ReadFile(file, header, sizeof(header), &got, NULL) || got != sizeof(header)) {
+        CloseHandle(file);
+        return PGEN_ASSOCIATION_UNKNOWN;
+    }
+    count = read_be32(header + 128);
+    if (count > 4096 || 132ULL + (uint64_t)count * 12ULL > (uint64_t)size.QuadPart) {
+        CloseHandle(file);
+        return PGEN_ASSOCIATION_UNKNOWN;
+    }
+    for (i = 0; i < count; i++) {
+        BYTE tag[12], payload[20];
+        LARGE_INTEGER position;
+        uint32_t offset, tag_size;
+        position.QuadPart = 132ULL + (uint64_t)i * 12ULL;
+        if (!SetFilePointerEx(file, position, NULL, FILE_BEGIN) ||
+            !ReadFile(file, tag, sizeof(tag), &got, NULL) || got != sizeof(tag)) break;
+        if (memcmp(tag, "pGAs", 4) != 0) continue;
+        offset = read_be32(tag + 4);
+        tag_size = read_be32(tag + 8);
+        position.QuadPart = offset;
+        if (tag_size < sizeof(payload) ||
+            (uint64_t)offset + sizeof(payload) > (uint64_t)size.QuadPart ||
+            !SetFilePointerEx(file, position, NULL, FILE_BEGIN) ||
+            !ReadFile(file, payload, sizeof(payload), &got, NULL) || got != sizeof(payload)) break;
+        CloseHandle(file);
+        if (memcmp(payload, "text\0\0\0\0", 8) != 0 || payload[19] != 0)
+            return PGEN_ASSOCIATION_UNKNOWN;
+        if (memcmp(payload + 8, "windows-sdr", 11) == 0) return PGEN_ASSOCIATION_SDR;
+        if (memcmp(payload + 8, "windows-hdr", 11) == 0) return PGEN_ASSOCIATION_HDR;
+        return PGEN_ASSOCIATION_UNKNOWN;
+    }
+    CloseHandle(file);
+    return PGEN_ASSOCIATION_UNKNOWN;
+}
+
 static BOOL profile_name_is_hdr(const WCHAR *path) {
     WCHAR upper[MAX_PATH];
     size_t i;
@@ -376,12 +428,15 @@ static BOOL profile_name_is_hdr(const WCHAR *path) {
    the ICC payload. A non-MHC2 HDR profile still belongs in Windows' EXTENDED
    (HDR) association list; requiring MHC2 here made Windows show every HDR
    cLUT-only profile as an SDR profile. Classify from the content, because a
-   renamed profile still has to reach the right list: cicp marks HDR
-   authoritatively, and an MHC2 profile without cicp is HDR when its
-   calibrated peak clears the SDR range (measured across this project's
-   profiles: SDR 152-168 cd/m2, HDR 299-999). The file name is the last
-   resort, for profiles carrying neither tag. */
+   renamed profile still has to reach the right list. New PGenerator+
+   profiles carry an authoritative private association marker. For older
+   profiles, cicp marks HDR authoritatively, and an MHC2 profile without cicp
+   is treated as HDR when its calibrated peak clears the usual SDR range. The
+   file name remains the last resort for profiles carrying none of them. */
 static BOOL profile_is_hdr_association(const WCHAR *path) {
+    int association = profile_association_marker(path);
+    if (association != PGEN_ASSOCIATION_UNKNOWN)
+        return association == PGEN_ASSOCIATION_HDR;
     return profile_contains_hdr_cicp(path) ||
            profile_mhc2_peak_luminance(path) >= 250.0 ||
            profile_name_is_hdr(path);
