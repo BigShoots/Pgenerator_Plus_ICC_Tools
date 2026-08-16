@@ -63,6 +63,8 @@ typedef HRESULT (WINAPI *PFN_ColorProfileRemoveDisplayAssociation)(
 typedef struct {
     LUID adapter;
     UINT32 source_id;
+    LUID target_adapter;
+    UINT32 target_id;
     WCHAR source_name[CCHDEVICENAME];
     WCHAR friendly[128];
     WCHAR monitor_path[256];
@@ -620,6 +622,8 @@ static void enumerate_displays(void) {
         ZeroMemory(entry, sizeof(*entry));
         entry->adapter = paths[i].sourceInfo.adapterId;
         entry->source_id = paths[i].sourceInfo.id;
+        entry->target_adapter = paths[i].targetInfo.adapterId;
+        entry->target_id = paths[i].targetInfo.id;
         wcsncpy_s(entry->source_name, CCHDEVICENAME, source.viewGdiDeviceName, _TRUNCATE);
         wcsncpy_s(entry->friendly, 128,
                   target.monitorFriendlyDeviceName[0] ? target.monitorFriendlyDeviceName : source.viewGdiDeviceName,
@@ -1159,6 +1163,56 @@ static BOOL enable_per_user_profiles(DISPLAY_ENTRY *display, BOOL interactive) {
     return FALSE;
 }
 
+/* Windows keeps the Advanced Color association name when a fine-tune pass
+   replaces that profile's bytes, but DWM can continue using the transform it
+   built from the previous file. Re-enter HDR on the selected target before
+   reporting the Companion install complete so the next meter pass sees the
+   newly installed MHC2 curves. This is the per-display equivalent of the
+   Win+Alt+B recovery that operators otherwise have to perform by hand. */
+static BOOL refresh_advanced_color_profile(DISPLAY_ENTRY *display) {
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info;
+    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE state;
+    LONG result;
+    int attempt;
+    if (!display) return FALSE;
+    ZeroMemory(&info, sizeof(info));
+    info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+    info.header.size = sizeof(info);
+    info.header.adapterId = display->target_adapter;
+    info.header.id = display->target_id;
+    result = DisplayConfigGetDeviceInfo(&info.header);
+    if (result != ERROR_SUCCESS) {
+        SetLastError((DWORD)result);
+        return FALSE;
+    }
+    if (!info.advancedColorEnabled) return TRUE;
+
+    ZeroMemory(&state, sizeof(state));
+    state.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
+    state.header.size = sizeof(state);
+    state.header.adapterId = display->target_adapter;
+    state.header.id = display->target_id;
+    state.enableAdvancedColor = 0;
+    result = DisplayConfigSetDeviceInfo(&state.header);
+    if (result != ERROR_SUCCESS) {
+        SetLastError((DWORD)result);
+        return FALSE;
+    }
+    Sleep(3000);
+    state.enableAdvancedColor = 1;
+    for (attempt = 0; attempt < 6; attempt++) {
+        result = DisplayConfigSetDeviceInfo(&state.header);
+        if (result == ERROR_SUCCESS) break;
+        Sleep(500);
+    }
+    if (result != ERROR_SUCCESS) {
+        SetLastError((DWORD)result);
+        return FALSE;
+    }
+    Sleep(4000);
+    return TRUE;
+}
+
 static BOOL associate_profile(DISPLAY_ENTRY *display, BOOL interactive) {
     HRESULT hr;
     BOOL associated;
@@ -1296,12 +1350,24 @@ static BOOL apply_profile(BOOL interactive) {
     if (!reinstalled) {
         WCHAR actual[MAX_PATH + 128] = L"";
         if (profile_is_active(display, actual, sizeof(actual) / sizeof(actual[0]))) {
+            if (g_associate_advanced && g_profile_has_mhc2 &&
+                !refresh_advanced_color_profile(display)) {
+                if (interactive)
+                    message_error(g_window, L"Reloading the Advanced Color profile", GetLastError());
+                return FALSE;
+            }
             wcsncpy_s(g_saved_monitor_path, 256, display->monitor_path, _TRUNCATE);
             save_settings();
             return TRUE;
         }
     }
     if (!associate_profile(display, interactive)) return FALSE;
+    if (g_associate_advanced && g_profile_has_mhc2 &&
+        !refresh_advanced_color_profile(display)) {
+        if (interactive)
+            message_error(g_window, L"Reloading the Advanced Color profile", GetLastError());
+        return FALSE;
+    }
     wcsncpy_s(g_saved_monitor_path, 256, display->monitor_path, _TRUNCATE);
     save_settings();
     return TRUE;
