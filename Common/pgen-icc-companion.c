@@ -81,6 +81,7 @@ typedef struct {
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -562,6 +563,14 @@ typedef struct {
     int settings_size;
     uint64_t settings_revision;
     uint64_t applied_settings_revision;
+    /* Taking the screen is deferred until PGenerator+ actually asks for
+     * something. The stored WebUI preference arrives on the first poll, so
+     * honouring it immediately meant the Companion went fullscreen the moment
+     * it connected - before any series existed - and sat on top of whatever
+     * the operator was doing. See process_network_updates. */
+    uint64_t first_settings_revision;
+    bool deferred_fullscreen;
+    bool patches_started;
     char correction_mode[16];
     char correction_profile[192];
 #ifdef _WIN32
@@ -4501,12 +4510,17 @@ static void process_network_updates(void)
     bool have_command = false, alignment = false, status_dirty = false;
     bool have_settings = false, settings_fullscreen = false;
     int command_size = 100, settings_size = 100;
+    /* The stored patch size, captured whether or not settings arrived this
+     * poll, so a deferred fullscreen applies the operator's size and not a
+     * default. */
+    int stored_size = 100;
     uint64_t settings_revision = 0;
     uint64_t sequence = 0;
     double r = 0.0, g = 0.0, b = 0.0;
     double max_luma = 1000.0, min_luma = 0.005, max_cll = 1000.0, max_fall = 400.0;
     char mode[32] = "sdr", title[256] = "";
     SDL_LockMutex(app.network_mutex);
+    stored_size = app.settings_size;
     if (app.status_dirty) {
         status_dirty = true;
         SDL_strlcpy(title, app.status, sizeof(title));
@@ -4533,17 +4547,51 @@ static void process_network_updates(void)
     SDL_UnlockMutex(app.network_mutex);
     if (status_dirty) SDL_SetWindowTitle(app.window, title);
     if (have_settings) {
+        /* Fullscreen on request, not on connect.
+         *
+         * The stored WebUI preference arrives with the first poll, so applying
+         * it as it stands took the whole screen the moment the Companion
+         * connected - before any patch existed and over whatever the operator
+         * had in front of them. Defer it until PGenerator+ asks for a pattern.
+         *
+         * An operator toggling the setting mid-session IS a request and is
+         * honoured at once. The two are told apart by revision: the first one
+         * seen is whatever was already stored, anything after it is a
+         * deliberate change. */
+        bool initial = (app.first_settings_revision == 0);
+        bool operator_change;
+        bool go_fullscreen;
+        if (initial) app.first_settings_revision = settings_revision;
+        operator_change = !initial && settings_revision != app.first_settings_revision;
+        go_fullscreen = settings_fullscreen &&
+                        (operator_change || app.patches_started);
+        if (settings_fullscreen && !go_fullscreen) {
+            app.deferred_fullscreen = true;
+            SDL_Log("Staying windowed until PGenerator+ asks for a pattern; "
+                    "the stored setting is fullscreen and will be applied then");
+        }
         /* Always consume the revision. On Wayland, fullscreen/position changes
          * can fail or be asynchronous; retrying every poll (50-500 ms) made the
          * window thrash in and out of the taskbar. One attempt per revision is
          * enough: the operator can toggle the setting again if needed. */
-        (void)apply_display_settings(settings_fullscreen, settings_size);
+        (void)apply_display_settings(go_fullscreen, settings_size);
         SDL_LockMutex(app.network_mutex);
         app.applied_settings_revision = settings_revision;
         SDL_UnlockMutex(app.network_mutex);
     }
     if (have_command) {
         bool ok;
+        /* The request the deferral above was waiting for. An alignment pattern
+         * counts: that is the operator positioning the meter, which wants the
+         * screen as much as a patch does. */
+        if (!app.patches_started) {
+            app.patches_started = true;
+            if (app.deferred_fullscreen) {
+                app.deferred_fullscreen = false;
+                (void)apply_display_settings(true, stored_size);
+                SDL_Log("PGenerator+ asked for a pattern; going fullscreen now");
+            }
+        }
 #ifdef _WIN32
         bool refresh_fullscreen_hdr =
             app.fullscreen && !alignment && !strcmp(mode, "hdr10") &&
@@ -4879,6 +4927,77 @@ static bool companion_pair(void)
     }
 }
 
+/* One Companion per user.
+ *
+ * Nothing stopped a second instance, and the failure is silent rather than
+ * loud: two patch windows on the same display, the meter reads whichever is
+ * topmost, and the server talks to whichever polled last. Every reading is
+ * then attributable to the wrong window with nothing anywhere reporting a
+ * fault. Launching the .app twice from Finder is already single-instance
+ * through LaunchServices, but running the binary directly - which is what the
+ * README documents, and what any scripted run does - bypasses that entirely.
+ *
+ * An advisory lock is the right shape: the kernel releases it however the
+ * process exits, so a crash leaves nothing stale to clean up. Failing to place
+ * the lock is deliberately not treated as a conflict - a read-only or missing
+ * preferences directory should not stop someone working. */
+static int instance_lock_fd = -1;
+
+static bool claim_single_instance(char *message, size_t message_size)
+{
+    if (message && message_size) message[0] = '\0';
+#ifdef _WIN32
+    /* The Windows equivalent is a named mutex. Not written here because it
+     * cannot be tested from this platform, and a guard that has never run is
+     * worse than an absent one. */
+    return true;
+#else
+    {
+        const char *pref = SDL_GetPrefPath("PGeneratorPlus", "PatchCompanion");
+        char path[1024];
+        int fd;
+        if (!pref) return true;
+        SDL_snprintf(path, sizeof(path), "%scompanion.lock", pref);
+        fd = open(path, O_CREAT | O_RDWR, 0600);
+        if (fd < 0) return true;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            char pid[32];
+            int length = SDL_snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+            /* Best effort: the lock is what matters, the pid is only so the
+             * second instance can name the first. */
+            if (ftruncate(fd, 0) == 0 && length > 0) {
+                ssize_t written = write(fd, pid, (size_t)length);
+                (void)written;
+            }
+            instance_lock_fd = fd;   /* held for the life of the process */
+            return true;
+        }
+        {
+            char buffer[32];
+            long other = 0;
+            ssize_t got = pread(fd, buffer, sizeof(buffer) - 1, 0);
+            if (got > 0) { buffer[got] = '\0'; other = strtol(buffer, NULL, 10); }
+            close(fd);
+            if (message) {
+                if (other > 0)
+                    SDL_snprintf(message, message_size,
+                                 "PGenerator+ Patch Companion is already running "
+                                 "as process %ld.\n\nTwo Companions on one display "
+                                 "measure each other's patches, so this one will "
+                                 "not start. Quit the other first.", other);
+                else
+                    SDL_snprintf(message, message_size,
+                                 "PGenerator+ Patch Companion is already running.\n\n"
+                                 "Two Companions on one display measure each "
+                                 "other's patches, so this one will not start. "
+                                 "Quit the other first.");
+            }
+        }
+        return false;
+    }
+#endif
+}
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
     memset(&app, 0, sizeof(app));
@@ -4900,6 +5019,24 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return SDL_APP_FAILURE;
     }
 #endif
+    /* Before anything reaches the display or the server: a second Companion
+     * would put a second patch window on the same screen and pair alongside
+     * the first, and neither side reports that as a fault. */
+    {
+        char taken[512];
+        if (!claim_single_instance(taken, sizeof(taken))) {
+            /* stderr and exit, deliberately without a message box. A modal
+             * dialog here waits for a click that a scripted launch will never
+             * make, turning a clean refusal into a hang - measured at the full
+             * timeout before this was changed. Nothing is lost by omitting it:
+             * on macOS a second launch from Finder is already prevented by
+             * LaunchServices, so the only way to reach this path is a command
+             * line, where stderr is the channel that is actually read. */
+            fprintf(stderr, "%s\n", taken);
+            SDL_Log("%s", taken);
+            return SDL_APP_FAILURE;
+        }
+    }
     if (!load_config(&app.config, argc, argv)) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PGenerator+ Patch Companion",
                                  "Could not find a PGenerator+ on this network. PGenerator+ answers to "
