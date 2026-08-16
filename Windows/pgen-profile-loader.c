@@ -824,14 +824,6 @@ static BOOL install_elevated(const WCHAR *path) {
     }
 }
 
-static BOOL installed_profile_exists(const WCHAR *name) {
-    WCHAR directory[MAX_PATH], path[MAX_PATH];
-    DWORD count = MAX_PATH;
-    if (!GetColorDirectoryW(NULL, directory, &count)) return FALSE;
-    swprintf(path, MAX_PATH, L"%ls\\%ls", directory, name);
-    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
-}
-
 static BOOL display_profile_is_associated(DISPLAY_ENTRY *display, const WCHAR *name) {
     LPWSTR *profiles = NULL;
     DWORD count = 0, i;
@@ -879,6 +871,62 @@ static BOOL installed_profile_path(const WCHAR *name, WCHAR *path, size_t path_c
     if (swprintf(path, path_count, L"%ls\\%ls", directory,
                  profile_basename(name)) < 0) return FALSE;
     return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+/* An installed profile of the same name is not necessarily the same profile.
+   A rebuilt or fine-tuned profile keeps its generated name, so treating the
+   name as proof of installation leaves Windows serving the previous version's
+   bytes under it and the new calibration never reaches the display. */
+static BOOL installed_profile_matches(const WCHAR *name, const WCHAR *source_path) {
+    WCHAR path[MAX_PATH];
+    HANDLE installed, source;
+    LARGE_INTEGER installed_size, source_size;
+    BOOL same;
+    if (!source_path || !source_path[0] ||
+        !installed_profile_path(name, path, MAX_PATH)) return FALSE;
+    installed = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+    if (installed == INVALID_HANDLE_VALUE) return FALSE;
+    source = CreateFileW(source_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+    if (source == INVALID_HANDLE_VALUE) {
+        CloseHandle(installed);
+        return FALSE;
+    }
+    same = GetFileSizeEx(installed, &installed_size) &&
+           GetFileSizeEx(source, &source_size) &&
+           installed_size.QuadPart == source_size.QuadPart;
+    while (same) {
+        BYTE left[8192], right[8192];
+        DWORD got_left = 0, got_right = 0;
+        if (!ReadFile(installed, left, sizeof(left), &got_left, NULL) ||
+            !ReadFile(source, right, sizeof(right), &got_right, NULL) ||
+            got_left != got_right) same = FALSE;
+        else if (!got_left) break;
+        else if (memcmp(left, right, got_left) != 0) same = FALSE;
+    }
+    CloseHandle(source);
+    CloseHandle(installed);
+    return same;
+}
+
+/* InstallColorProfileW copies with the fail-if-exists flag set, so new bytes
+   cannot land on a name the colour directory already holds: the stale copy has
+   to be uninstalled first. Removal fails while Windows still has the profile
+   open, and a caller that cannot replace the file must not go on to associate
+   a name whose content is stale. */
+static BOOL install_profile_file(const WCHAR *path) {
+    WCHAR installed[MAX_PATH];
+    DWORD error;
+    if (InstallColorProfileW(NULL, path)) return TRUE;
+    error = GetLastError();
+    if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) return FALSE;
+    if (!installed_profile_path(profile_basename(path), installed, MAX_PATH)) {
+        SetLastError(error);
+        return FALSE;
+    }
+    if (!UninstallColorProfileW(NULL, installed, TRUE)) return FALSE;
+    return InstallColorProfileW(NULL, path);
 }
 
 static BOOL get_default_name(DISPLAY_ENTRY *display, COLORPROFILESUBTYPE subtype,
@@ -1138,6 +1186,7 @@ static void set_selected_profile_default(void) {
 static BOOL apply_profile(BOOL interactive) {
     DISPLAY_ENTRY *display = selected_display();
     DWORD error;
+    BOOL reinstalled = FALSE;
     if (!display) {
         if (interactive) MessageBoxW(g_window, L"Select an active display first.", APP_NAME,
                                      MB_OK | MB_ICONWARNING);
@@ -1155,14 +1204,17 @@ static BOOL apply_profile(BOOL interactive) {
         return FALSE;
     }
     wcsncpy_s(g_profile_name, MAX_PATH, profile_basename(g_profile_path), _TRUNCATE);
-    if (!installed_profile_exists(g_profile_name) && !InstallColorProfileW(NULL, g_profile_path)) {
-        error = GetLastError();
-        if (interactive && (error == ERROR_ACCESS_DENIED || error == ERROR_PRIVILEGE_NOT_HELD) &&
-            install_elevated(g_profile_path)) {
-            error = ERROR_SUCCESS;
-        } else if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
-            if (interactive) message_error(g_window, L"Installing the color profile", error);
-            return FALSE;
+    if (!installed_profile_matches(g_profile_name, g_profile_path)) {
+        reinstalled = TRUE;
+        if (!install_profile_file(g_profile_path)) {
+            error = GetLastError();
+            if (interactive && (error == ERROR_ACCESS_DENIED || error == ERROR_PRIVILEGE_NOT_HELD) &&
+                install_elevated(g_profile_path)) {
+                error = ERROR_SUCCESS;
+            } else if (!installed_profile_matches(g_profile_name, g_profile_path)) {
+                if (interactive) message_error(g_window, L"Installing the color profile", error);
+                return FALSE;
+            }
         }
     }
     g_profile_has_mhc2 = profile_contains_mhc2(g_profile_path);
@@ -1171,7 +1223,11 @@ static BOOL apply_profile(BOOL interactive) {
        the per-user WCS association list even though Color Management is still
        configured to ignore that list. */
     if (!enable_per_user_profiles(display, interactive)) return FALSE;
-    {
+    /* Replacing the file leaves the association name unchanged, so the
+       shortcut below would report success while Windows still holds the
+       transform it built from the previous bytes. Set the association again
+       instead. */
+    if (!reinstalled) {
         WCHAR actual[MAX_PATH + 128] = L"";
         if (profile_is_active(display, actual, sizeof(actual) / sizeof(actual[0]))) {
             wcsncpy_s(g_saved_monitor_path, 256, display->monitor_path, _TRUNCATE);
@@ -2035,7 +2091,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
         while (*path == L' ' || *path == L'\"') path++;
         n = wcslen(path);
         if (n && path[n - 1] == L'\"') path[n - 1] = L'\0';
-        return InstallColorProfileW(NULL, path) ? 0 : (int)GetLastError();
+        return install_profile_file(path) ? 0 : (int)GetLastError();
     }
     if (already_running(command_line)) return 0;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
