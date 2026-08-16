@@ -965,23 +965,25 @@ static BOOL installed_profile_matches(const WCHAR *name, const WCHAR *source_pat
     return same;
 }
 
-/* InstallColorProfileW copies with the fail-if-exists flag set, so new bytes
-   cannot land on a name the colour directory already holds: the stale copy has
-   to be uninstalled first. Removal fails while Windows still has the profile
-   open, and a caller that cannot replace the file must not go on to associate
-   a name whose content is stale. */
+/* InstallColorProfileW is not a replacement operation. On current Windows 11
+   it can even return success when a profile of the same name is already
+   installed while leaving that file's old bytes untouched. Compare first and
+   proactively uninstall a differing copy, then verify the installed bytes
+   after every install. A caller that cannot replace the file must not go on to
+   associate a name whose content is stale. */
 static BOOL install_profile_file(const WCHAR *path) {
     WCHAR installed[MAX_PATH];
-    DWORD error;
-    if (InstallColorProfileW(NULL, path)) return TRUE;
-    error = GetLastError();
-    if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) return FALSE;
-    if (!installed_profile_path(profile_basename(path), installed, MAX_PATH)) {
-        SetLastError(error);
+    const WCHAR *name = profile_basename(path);
+    if (installed_profile_path(name, installed, MAX_PATH)) {
+        if (installed_profile_matches(name, path)) return TRUE;
+        if (!UninstallColorProfileW(NULL, installed, TRUE)) return FALSE;
+    }
+    if (!InstallColorProfileW(NULL, path)) return FALSE;
+    if (!installed_profile_matches(name, path)) {
+        SetLastError(ERROR_WRITE_FAULT);
         return FALSE;
     }
-    if (!UninstallColorProfileW(NULL, installed, TRUE)) return FALSE;
-    return InstallColorProfileW(NULL, path);
+    return TRUE;
 }
 
 static BOOL get_default_name(DISPLAY_ENTRY *display, COLORPROFILESUBTYPE subtype,
