@@ -113,6 +113,7 @@ static UINT g_mismatch_count;
 static BOOL g_reapply_attempted_for_mismatch;
 static volatile LONG g_apply_in_progress;
 static volatile LONG g_browse_in_progress;
+static volatile LONG g_advanced_color_refresh_in_progress;
 static BOOL g_profile_pending_selection;
 static WCHAR g_browse_path[MAX_PATH];
 static BOOL g_browse_has_mhc2;
@@ -1187,6 +1188,7 @@ static BOOL refresh_advanced_color_profile(DISPLAY_ENTRY *display) {
     }
     if (!info.advancedColorEnabled) return TRUE;
 
+    InterlockedExchange(&g_advanced_color_refresh_in_progress, 1);
     ZeroMemory(&state, sizeof(state));
     state.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
     state.header.size = sizeof(state);
@@ -1195,6 +1197,7 @@ static BOOL refresh_advanced_color_profile(DISPLAY_ENTRY *display) {
     state.enableAdvancedColor = 0;
     result = DisplayConfigSetDeviceInfo(&state.header);
     if (result != ERROR_SUCCESS) {
+        InterlockedExchange(&g_advanced_color_refresh_in_progress, 0);
         SetLastError((DWORD)result);
         return FALSE;
     }
@@ -1206,10 +1209,12 @@ static BOOL refresh_advanced_color_profile(DISPLAY_ENTRY *display) {
         Sleep(500);
     }
     if (result != ERROR_SUCCESS) {
+        InterlockedExchange(&g_advanced_color_refresh_in_progress, 0);
         SetLastError((DWORD)result);
         return FALSE;
     }
     Sleep(4000);
+    InterlockedExchange(&g_advanced_color_refresh_in_progress, 0);
     return TRUE;
 }
 
@@ -1462,7 +1467,9 @@ static BOOL finish_companion_apply_if_active(void) {
     DISPLAY_ENTRY *display;
     WCHAR standard[MAX_PATH] = L"", advanced[MAX_PATH] = L"";
     const WCHAR *current;
-    if (!g_companion_result[0] || !g_profile_name[0]) return FALSE;
+    if (!g_companion_result[0] || !g_profile_name[0] ||
+        InterlockedCompareExchange(&g_advanced_color_refresh_in_progress, 0, 0) != 0)
+        return FALSE;
     display = selected_display();
     if (!display || !registry_profile_defaults(display, standard, MAX_PATH,
                                                 advanced, MAX_PATH)) return FALSE;
