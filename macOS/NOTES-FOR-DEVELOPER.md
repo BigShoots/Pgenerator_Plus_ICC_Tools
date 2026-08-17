@@ -7,6 +7,13 @@ ASUS VE228 over HDMI→DVI, Dell U2723QE over USB-C, X-Rite i1 DisplayPro.
 Each section below is self-contained — send whichever are useful, in any order.
 **Everything here has been measured** except where it says otherwise.
 
+> **Start with section 16.** The Patch Companion in the released v1.4.20 macOS
+> DMG contains none of the macOS-specific code, verified in both the tree and
+> the shipped binary. The visible symptom is that it cannot pair (§9). The
+> symptom that matters is silent: without the device colour space tagging, a
+> profile built on a wide-gamut display characterises sRGB-converted output
+> rather than the display (§10), and nothing in the run reports it.
+
 ---
 
 ## 1. PQ numbers, if you want them for the docs
@@ -583,3 +590,83 @@ persisted — `save_config()` writes a `DISPLAY` key, but nothing populates it
 from that prompt, so every launch asks again. `--display="DELL U2723QE"` skips
 it, which is what made scripted testing possible at all. Persisting the answer
 would make an unattended relaunch mid-session actually unattended.
+
+---
+
+*Section 16 added 2026-08-17. Please read this one first. It is the reason the
+rest of the file matters, and it went unnoticed on both sides for a while.*
+
+## 16. The shipped macOS Companion has none of the macOS code
+
+The Patch Companion in the released v1.4.20 macOS DMG is the generic POSIX
+build. None of the macOS-specific work is compiled into it. We only found this
+by asking why a fresh install could not pair, and the answer turned out to be
+much larger than pairing.
+
+From the tree:
+
+| | this fork | upstream/main |
+|---|---|---|
+| `macOS/pgen-macos-color.{h,m}` | present | **absent** |
+| `#ifdef PGEN_MACOS` blocks in `Common/pgen-icc-companion.c` | **19** | **0** |
+| macOS CI compile | Companion **+** `pgen-macos-color.m` | `Common/pgen-icc-companion.c` alone |
+
+`macOS/` on `upstream/main` holds exactly two files, `README.txt` and
+`pgen-profile-loader-macos.c`. `upstream/macos-port` only ever held
+`README.txt`, so the "Merge the macOS port" commit took essentially none of the
+port; the loader arrived separately later.
+
+Confirmed against the released binary itself rather than only the source, by
+looking for markers that exist solely in the macOS backend:
+
+| marker | v1.4.20 DMG | our build |
+|---|---|---|
+| `SDL_VIDEO_MAC_FULLSCREEN_SPACES` | 0 | 1 |
+| `SDL_WINDOW_ACTIVATE_WHEN_RAISED` | 0 | 1 |
+| `platform-compat` | 0 | 3 |
+| `macOS: ` log strings | 0 | 8 |
+| ColorSync / QuartzCore / Metal linked | 1 | 3 |
+
+**The consequence that matters is section 10, not section 9.** Pairing failing
+is loud: the operator sees "Invalid pairing request" and stops. The colour
+space handling fails silently. Without the macOS backend, `layer.colorspace`
+is never set, it stays nil, and the compositor treats nil as sRGB — so on a
+wide-gamut display every patch is converted on the way out. Section 10 measured
+that on a P3 panel: red at 0.6433/0.3400 where the display's own red is
+0.6733/0.3267, and green 0.093 away from native.
+
+So a profile built with the official macOS Companion on a wide-gamut display
+characterises sRGB-converted output rather than the display. It completes, it
+looks plausible, and it is wrong. Nothing in the run reports it.
+
+To be exact about the evidence: the absence of the code is verified in both the
+tree and the shipped binary, and the size of the error is measured in section
+10. We did not reproduce section 10's experiment against the released binary,
+because it cannot pair with a unit — the two failures interlock, and the loud
+one hides the silent one.
+
+The profile loader is the one piece that did land, and it is this fork's file:
+`c5028c1` is the same code with `#include "pgen-macos-color.h"` expanded inline,
+which is what happens when the loader is taken and the shared backend it was
+factored out into is not. Reconciling it is mechanical — keep the shared
+header, since the Companion needs `pgen-macos-color.m` anyway. There is no
+competing implementation to choose between.
+
+What is missing is the Companion half, and it carries everything in this file:
+the device colour space tagging (§10), `--platform-compat` (§9), the
+Spaces-free fullscreen and the SDL hint policy (§15), the tone-mapping
+warnings (§11), and the focus handling (§15).
+
+Suggested order, worst-first rather than easiest-first:
+
+1. **Take the Companion-side macOS integration**, or pull the macOS build from
+   the release until it is in. Shipping a build that silently mismeasures
+   wide-gamut displays is worse than shipping no macOS build, because the
+   operator has no way to tell.
+2. **Widen the platform regexes** to `(windows|linux|macos)` so a stock unit
+   pairs at all.
+3. Restore the `pgen-macos-color.h` include in the loader and drop the inlined
+   copy.
+
+We are glad to open this as a PR in whatever shape is easiest to review —
+one branch, or split per section.
