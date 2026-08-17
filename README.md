@@ -24,9 +24,18 @@ warning.
 
 ## Current release
 
-Version 1.4.19 is paired with the pgen25 KWin build. The Patch Companion in
-this release:
+Version 1.4.20 is paired with the current PGenerator+ build. The desktop tools
+in this release:
 
+- preserve Windows MHC2 correction while OLED protection patches are inserted;
+- classify Windows SDR and Advanced Color profile associations from ICC
+  content, including PGenerator+'s explicit association marker, instead of
+  relying on the file name;
+- replace stale same-named profiles in the Windows color store and verify the
+  installed bytes;
+- preserve a saved Advanced Color association for unmarked vendor profiles;
+- reload Windows Advanced Color after an MHC2 profile changes and wait for the
+  reload before reporting that the profile is ready;
 - bundles a colprof build that fills B2A tables across worker processes on
   Linux, cutting local profile fitting time roughly in half on multi-core
   machines while producing byte-identical profiles;
@@ -63,6 +72,9 @@ this release:
   build as complete.
 
 The Linux archive and Arch package also contain `reset-hdr-tonemapping.sh`.
+The bundled `colprof` and `profcheck` binaries are built from the pinned
+`ArgyllCMS_ICC4.4` submodule at commit `0613c3f` (`argyll-4.4-icc44-pgen1`),
+including the ICC 4.4/CICP support and the Linux parallel B2A table builder.
 The release `SHA256SUMS` file covers all downloads.
 
 ### Installing a completed profile from the WebUI
