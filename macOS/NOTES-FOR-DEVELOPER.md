@@ -419,3 +419,67 @@ Cleaner still would be preferring `SDL_GetPrefPath()` for writes on macOS and
 leaving the base path read-only by construction, rather than relying on a
 permission bit to force the fallback. Worth deciding before a bundle ships,
 because the `chmod` is invisible and nothing in the build enforces it.
+
+---
+
+*Section 14 added 2026-08-17. Feature proposal rather than a defect, and the
+only section here arguing for new scope. Measured, not sketched.*
+
+## 14. Closed-loop DDC/CI white point and brightness — worth building
+
+`ddc-probe.sh` already argues this from the read side. We have now run the
+write side as a closed loop against a real panel, so here are the numbers.
+
+Dell U2723QE over USB-C, i1Display Pro Plus, patches from the Patch Companion,
+every value below measured rather than read back from the monitor:
+
+| step | Y cd/m² | x | y | CCT | Δu′v′ vs D65 |
+|---|---|---|---|---|---|
+| as found | 154.63 | 0.2954 | 0.3359 | 7403 | 0.0144 |
+| brightness to target | 120.97 | 0.2956 | 0.3365 | 7383 | 0.0145 |
+| gains R100 G89 B90 | 98.68 | 0.3138 | 0.3293 | 6441 | 0.0007 |
+| brightness re-trimmed | 120.39 | 0.3134 | 0.3289 | 6470 | 0.0005 |
+
+From 7403 K to Δu′v′ 0.0005 in six measurement iterations, fully unattended.
+Nothing about that needs an operator, and it is the step most likely to be
+skipped or done badly by hand.
+
+**Why it belongs before profiling, not instead of it.** Every bit of white
+point left uncorrected on the monitor has to be carried by VCGT instead, in the
+GPU LUT, where it costs bit depth. Correcting x by 0.017 in the panel's own
+gains is free; correcting it in VCGT is not. The profile then describes a
+display already close to its target, which is the case its cLUT fits best.
+
+**The design point the measurements settled: this is a loop, not a sequence.**
+Trimming gains cost 18% of the light — 120.97 down to 98.68 — because gains are
+attenuators and the only headroom is downward once a channel sits at 100. So
+brightness had to be re-trimmed afterwards, 46 to 61. Anything that sets
+brightness once and then adjusts gains will land low, silently, by roughly the
+size of the white point error. Converge on both together, or set gains first
+and brightness last.
+
+**Guard the transport, not just the result.** `m1ddc` reported luminance 65 for
+this display when the true value was 50, exactly the misaddressing failure
+`ddc-probe.sh` documents — it answers for the default display rather than
+failing. A DDC readback is therefore not evidence that a write landed on the
+intended panel. What settled it was writing two brightness values and measuring
+that the panel tracked them (65 → 154.9, 40 → 109.1). Any feature built on this
+should verify through the meter it already has, and refuse to proceed if a
+commanded change does not show up in a measurement.
+
+Not established here, and worth deciding before shipping:
+
+- Which OSD preset the gains landed in, and whether they persist across a power
+  cycle or input change. On many panels writes made in a fixed preset either do
+  not stick or silently switch preset — that is a per-model behaviour and needs
+  a survey, not an assumption.
+- Whether to write black level as well. We left it alone; it interacts with
+  contrast and is much easier to get wrong than white.
+- The transport on each platform. Shelling out to `m1ddc` was deliberate for a
+  probe and is probably wrong for the product; DDC/CI has no public macOS API
+  and the Apple Silicon route is the private `IOAVService`.
+
+The conservative version of this feature is worth having on its own: read the
+monitor's brightness at the start of a run, and refuse or warn if it changes
+before the end. That fixes by prevention the drift the meter probes can
+currently only detect after the fact, and needs no write path at all.
