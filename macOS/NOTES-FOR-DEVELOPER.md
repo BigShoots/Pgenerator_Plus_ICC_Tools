@@ -550,6 +550,33 @@ path every Windows patch takes is worse than the inconsistency. Worth someone
 with a Windows unit checking whether `SetForegroundWindow` there costs the
 operator their other display too.
 
+**A second bug the first fix uncovered.** With activation gone, the Companion
+stopped staying in front in *windowed* mode. `SDL_SetWindowAlwaysOnTop()` was
+called with `app.fullscreen`, so a windowed patch surface was never floated —
+it had simply been dragged forward by the per-patch activation every time, and
+nobody had noticed the flag was wrong because nothing depended on it.
+
+That is a silent measurement fault, not a cosmetic one: whatever covers the
+patch is what the meter reads, and nothing reports it. Always-on-top is now
+unconditional in `raise_pattern_window()`. Floating a window takes no focus, so
+it costs the operator none of what the activation cost them.
+
+Verified in windowed mode with another application deliberately in front:
+
+```
+companion z=40 layer=3 | topmost normal window: thinkorswim z=41 -> IN FRONT
+frontmost = JavaApplicationStub        (unchanged across patches)
+```
+
+Layer 3 against 0 is what matters — the window sits above every normal window
+by level rather than by ordering, so it cannot be buried by a click elsewhere.
+`CGWindowListCopyWindowInfo` is worth using rather than looking at the screen:
+`kCGWindowLayer` proves the level, and the z-index proves the ordering.
+
+`SDL_EVENT_WINDOW_LEAVE_FULLSCREEN` still clears the flag, so Escape hands the
+screen back, and the next patch re-asserts it. That ordering is deliberate: a
+patch on screen has to be visible to be worth measuring.
+
 **Unrelated papercut found while testing.** The "Select profiling display"
 prompt is modal and blocks startup until answered, and the choice is never
 persisted — `save_config()` writes a `DISPLAY` key, but nothing populates it

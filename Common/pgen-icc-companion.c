@@ -3552,7 +3552,20 @@ static bool windows_set_borderless_windowed(bool fullscreen)
  * to the path every Windows patch takes is worse than the inconsistency. */
 static void raise_pattern_window(void)
 {
-    SDL_SetWindowAlwaysOnTop(app.window, app.fullscreen);
+    /* Deliberately not tied to fullscreen. A windowed patch surface has to stay
+     * above other windows for the same reason a fullscreen one does: whatever
+     * covers it is what the meter reads, and nothing anywhere reports that.
+     *
+     * This used to be app.fullscreen, and windowed mode got away with it only
+     * because the per-patch activation dragged the whole application forward
+     * every patch. With that gone the window fell behind, which is a silent
+     * measurement fault rather than a cosmetic one. Floating the window takes
+     * no focus, so it costs the operator none of what the activation cost.
+     *
+     * SDL_EVENT_WINDOW_LEAVE_FULLSCREEN still clears the flag, so Escape hands
+     * the screen back. The next patch re-asserts it, which is right: a patch
+     * that is on screen has to be visible to be worth measuring. */
+    SDL_SetWindowAlwaysOnTop(app.window, true);
     SDL_ShowWindow(app.window);
     SDL_RaiseWindow(app.window);
 #ifdef _WIN32
