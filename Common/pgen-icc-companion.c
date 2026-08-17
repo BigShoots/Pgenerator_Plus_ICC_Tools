@@ -97,7 +97,7 @@ typedef int socket_handle_t;
 #include "pgen-icc-companion-icon.h"
 #endif
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+#ifndef _WIN32
 static int reap_profile_loader(void *opaque)
 {
     pid_t child = (pid_t)(intptr_t)opaque;
@@ -3862,15 +3862,6 @@ static void companion_report_install(const char *job, bool ok, const char *messa
 
 static void companion_run_install(const char *poll_response)
 {
-#ifdef __APPLE__
-    /* No Profile Loader ships for macOS, so the install-and-apply feature
-     * does not exist in this build. Refuse the job immediately with the
-     * reason, so the WebUI shows it instead of waiting out its timeout. */
-    char job[96] = "";
-    if (json_string(poll_response, "install_job", job, sizeof(job)) && job[0])
-        companion_report_install(job, false,
-                                 "Installing display profiles is not supported on macOS");
-#else
     char job[96] = "", file[256] = "", request[768], directory[1200], profile_path[1500];
     unsigned char *profile = NULL;
     size_t profile_length = 0;
@@ -3895,7 +3886,7 @@ static void companion_run_install(const char *poll_response)
         companion_report_install(job, false, "Patch Companion could not download a valid ICC profile");
         return;
     }
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
     profile_is_hdr = linux_profile_name_is_hdr(file) ||
                      profile_has_hdr_cicp(profile, profile_length);
 #endif
@@ -3959,6 +3950,106 @@ static void companion_run_install(const char *poll_response)
             remove(result_path);
         }
     }
+#elif defined(__APPLE__)
+    {
+        char loader[1200], display_argument[320], uuid_argument[128];
+        char result_argument[1600], result_path[1500];
+        char uuid_text[64] = "";
+        pid_t child;
+        (void)profile_is_hdr;   /* macOS keeps one profile slot per display */
+        if (!companion_tool_path("PGenProfileLoader", loader, sizeof(loader))) {
+            companion_report_install(job, false, "PGenerator+ Profile Loader is not installed beside Patch Companion");
+            return;
+        }
+        /* The display's CGDisplay UUID is the macOS analogue of the Windows
+         * monitor device path: stable across reboots and unambiguous when two
+         * identical panels are attached, which a display name is not. */
+        {
+            CGDirectDisplayID display_id = macos_direct_display_id(app.selected_display_id);
+            CFUUIDRef uuid = display_id ? CGDisplayCreateUUIDFromDisplayID(display_id) : NULL;
+            if (uuid) {
+                CFStringRef text = CFUUIDCreateString(NULL, uuid);
+                if (text) {
+                    CFStringGetCString(text, uuid_text, sizeof(uuid_text),
+                                       kCFStringEncodingUTF8);
+                    CFRelease(text);
+                }
+                CFRelease(uuid);
+            }
+        }
+        SDL_snprintf(result_path, sizeof(result_path), "%sinstall-%s.result", directory, job);
+        remove(result_path);
+        SDL_snprintf(display_argument, sizeof(display_argument), "--display=%s", app.selected_display);
+        SDL_snprintf(uuid_argument, sizeof(uuid_argument), "--display-uuid=%s", uuid_text);
+        SDL_snprintf(result_argument, sizeof(result_argument), "--result=%s", result_path);
+        child = fork();
+        if (child == 0) {
+            execl(loader, loader, "--apply-from-companion", uuid_argument,
+                  display_argument, result_argument, profile_path, (char *)NULL);
+            _exit(127);
+        }
+        if (child > 0) {
+            bool child_exited = false;
+            int child_status = 0;
+            /* The loader writes "ok" or "error: <reason>" once ColorSync has
+             * genuinely adopted (or refused) the profile - the same contract
+             * the Windows loader uses, and the reason macOS does not need the
+             * compositor-polling loop Linux falls back on below.
+             *
+             * Watch the child as well as the file. A loader that dies without
+             * writing - a dyld failure, a crash, bad arguments - would
+             * otherwise turn an instantly diagnosable error into two minutes
+             * of silence while this loop waits out its full timeout. */
+            for (int attempt = 0; attempt < 480; attempt++) {
+                FILE *result = fopen(result_path, "rb");
+                if (result) {
+                    char text[16] = "";
+                    fread(text, 1, sizeof(text) - 1, result);
+                    fclose(result);
+                    accepted = !strncmp(text, "ok", 2);
+                    break;
+                }
+                if (waitpid(child, &child_status, WNOHANG) == child) {
+                    /* One last look: it may have written the file in its final
+                     * moments, after this iteration's check. */
+                    result = fopen(result_path, "rb");
+                    if (result) {
+                        char text[16] = "";
+                        fread(text, 1, sizeof(text) - 1, result);
+                        fclose(result);
+                        accepted = !strncmp(text, "ok", 2);
+                    }
+                    child_exited = true;
+                    break;
+                }
+                SDL_Delay(250);
+            }
+            remove(result_path);
+            if (child_exited && !accepted) {
+                if (WIFSIGNALED(child_status))
+                    SDL_Log("Profile Loader died on signal %d without reporting "
+                            "a result", WTERMSIG(child_status));
+                else
+                    SDL_Log("Profile Loader exited with status %d without "
+                            "reporting a result",
+                            WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1);
+                SDL_free(profile);
+                companion_report_install(job, false,
+                    "Profile Loader exited without reporting a result - it may "
+                    "be missing a library or incompatible with this system");
+                return;
+            }
+            if (!child_exited) {
+                /* Still running after a result or the timeout: reap it in the
+                 * background rather than leaving a zombie. */
+                SDL_Thread *reaper = SDL_CreateThread(reap_profile_loader,
+                                                      "profile-loader-reaper",
+                                                      (void *)(intptr_t)child);
+                if (reaper) SDL_DetachThread(reaper);
+                else waitpid(child, NULL, WNOHANG);
+            }
+        }
+    }
 #else
     {
         char loader[1200], display_argument[256];
@@ -4000,7 +4091,6 @@ static void companion_run_install(const char *poll_response)
     companion_report_install(job, accepted,
                              accepted ? "Profile Loader installed and applied the profile to the selected display"
                                       : "Profile Loader could not verify the profile on the selected display");
-#endif
 }
 
 static int SDLCALL companion_install_thread_main(void *data)
