@@ -645,12 +645,22 @@ tree and the shipped binary, and the size of the error is measured in section
 because it cannot pair with a unit — the two failures interlock, and the loud
 one hides the silent one.
 
-The profile loader is the one piece that did land, and it is this fork's file:
-`c5028c1` is the same code with `#include "pgen-macos-color.h"` expanded inline,
-which is what happens when the loader is taken and the shared backend it was
-factored out into is not. Reconciling it is mechanical — keep the shared
-header, since the Companion needs `pgen-macos-color.m` anyway. There is no
-competing implementation to choose between.
+The profile loader is the one piece that did land, and it is this fork's file
+almost verbatim: everything outside one ~250-line section is identical, and
+that section is where we `#include "pgen-macos-color.h"`. Looked at closely,
+their section is not our file pasted in — it is a plain-C translation of the
+backend functions the loader uses (same names, CoreFoundation calls in place
+of our Objective-C), presumably so the loader keeps building as a single `.c`
+with no `.m` in the pipeline. Two functions that look novel there,
+`pgen_macos_id_for_uuid` and `pgen_macos_registered_profile`, are C rewrites
+of capability our backend has in ObjC idiom.
+
+So there is no competing design — but reconciling is a choice, not a
+find-and-replace. Taking the Companion means compiling `pgen-macos-color.m`
+anyway, at which point the loader can go back to the shared header; or the
+loader can keep its C translation and only the Companion gains the backend.
+Either is coherent. The one thing worth avoiding is both copies drifting
+independently, which is where they are headed now.
 
 What is missing is the Companion half, and it carries everything in this file:
 the device colour space tagging (§10), `--platform-compat` (§9), the
@@ -665,8 +675,9 @@ Suggested order, worst-first rather than easiest-first:
    operator has no way to tell.
 2. **Widen the platform regexes** to `(windows|linux|macos)` so a stock unit
    pairs at all.
-3. Restore the `pgen-macos-color.h` include in the loader and drop the inlined
-   copy.
+3. Decide where the loader's backend lives — shared header or your C
+   translation — so the two copies stop drifting. Either answer is fine;
+   having both is not.
 
 We are glad to open this as a PR in whatever shape is easiest to review —
 one branch, or split per section.
