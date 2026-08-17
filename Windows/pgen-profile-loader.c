@@ -16,7 +16,7 @@
 #include <wctype.h>
 
 #define APP_NAME L"PGenerator+ Profile Loader"
-#define APP_VERSION L"1.3.4"
+#define APP_VERSION L"1.3.5"
 #define WM_TRAYICON (WM_APP + 1)
 #define WM_APPLY_DONE (WM_APP + 2)
 #define WM_BROWSE_DONE (WM_APP + 3)
@@ -1355,7 +1355,11 @@ static BOOL apply_profile(BOOL interactive) {
     if (!reinstalled) {
         WCHAR actual[MAX_PATH + 128] = L"";
         if (profile_is_active(display, actual, sizeof(actual) / sizeof(actual[0]))) {
-            if (g_associate_advanced && g_profile_has_mhc2 &&
+            /* Any Advanced Color association change needs the reload cycle,
+             * not only MHC2 profiles: a cLUT-only HDR profile still changes
+             * the peak the pipeline reports, and an un-reloaded association
+             * was measured serving the previous transform mid-session. */
+            if (g_associate_advanced &&
                 !refresh_advanced_color_profile(display)) {
                 if (interactive)
                     message_error(g_window, L"Reloading the Advanced Color profile", GetLastError());
@@ -1367,7 +1371,7 @@ static BOOL apply_profile(BOOL interactive) {
         }
     }
     if (!associate_profile(display, interactive)) return FALSE;
-    if (g_associate_advanced && g_profile_has_mhc2 &&
+    if (g_associate_advanced &&
         !refresh_advanced_color_profile(display)) {
         if (interactive)
             message_error(g_window, L"Reloading the Advanced Color profile", GetLastError());

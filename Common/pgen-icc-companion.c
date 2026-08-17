@@ -106,8 +106,8 @@ static int reap_profile_loader(void *opaque)
 }
 #endif
 
-#define APP_VERSION "1.4.20"
-#define APP_BUILD "2"
+#define APP_VERSION "1.4.21"
+#define APP_BUILD "1"
 #define APP_TITLE "PGenerator+ Patch Companion " APP_VERSION " (build " APP_BUILD ")"
 /* Width in source code units over which the grey-axis calibration blends into
  * the cLUT result. */
@@ -554,6 +554,13 @@ typedef struct {
     SDL_Mutex *network_mutex;
     SDL_AtomicInt quit_requested;
     SDL_AtomicInt install_in_progress;
+    /* Set by the install worker when the Profile Loader finished applying a
+     * profile: the loader cycles Advanced Color underneath this process, and
+     * a swapchain created before that cycle can survive demoted to composed
+     * presentation, where Windows tone-maps output to the profile-reported
+     * peak. Consumed on the main thread by recreating the renderer before
+     * the next fullscreen HDR patch is displayed. */
+    SDL_AtomicInt presentation_recovery_pending;
     bool command_pending;
     uint64_t refresh_until_ms;
     uint64_t command_sequence;
@@ -641,6 +648,7 @@ static unsigned long pgen_nvapi_display_id;
 static int pgen_nvapi_original_tone_mapping;
 static int pgen_nvapi_last_status;
 static bool pgen_nvapi_source_active;
+static UINT pgen_adapter_vendor_id;
 static bool pgen_nvapi_tone_mapping_saved;
 static bool pgen_nvapi_metadata_valid;
 static PgenNvHdrMetadata pgen_nvapi_metadata;
@@ -2513,6 +2521,11 @@ static bool windows_create_hdr_output(void)
         result = ID3D11Device_QueryInterface(app.hdr_device, &pgen_iid_idxgi_device,
                                              (void **)&dxgi_device);
     if (SUCCEEDED(result)) result = IDXGIDevice_GetAdapter(dxgi_device, &adapter);
+    if (SUCCEEDED(result)) {
+        DXGI_ADAPTER_DESC adapter_desc;
+        if (SUCCEEDED(IDXGIAdapter_GetDesc(adapter, &adapter_desc)))
+            pgen_adapter_vendor_id = adapter_desc.VendorId;
+    }
     if (SUCCEEDED(result))
         result = IDXGIAdapter_GetParent(adapter, &pgen_iid_idxgi_factory2,
                                         (void **)&factory);
@@ -2566,16 +2579,30 @@ static bool windows_create_hdr_output(void)
         windows_destroy_hdr_output();
         return false;
     }
-    windows_nvapi_hdr_source_begin(app.window);
+    /* NVAPI only exists on NVIDIA: probing it on other vendors reported a
+     * loader sentinel (-2) as a driver error on every AMD and Intel machine.
+     * Name the actual path instead; the NVAPI error format is reserved for
+     * NVIDIA adapters where the status is a genuine NvAPI_Status. */
+    if (pgen_adapter_vendor_id == 0x10DE)
+        windows_nvapi_hdr_source_begin(app.window);
     app.hdr = true;
     app.hdr_active = windows_window_hdr_enabled(app.window);
     if (pgen_nvapi_source_active)
         SDL_strlcpy(app.renderer_name, "direct3d11-hdr10-nvapi-rec2100",
                     sizeof(app.renderer_name));
-    else
+    else if (pgen_adapter_vendor_id == 0x10DE)
         SDL_snprintf(app.renderer_name, sizeof(app.renderer_name),
                      "direct3d11-hdr10-nvapi-error-%d",
                      pgen_nvapi_last_status);
+    else if (pgen_adapter_vendor_id == 0x1002 || pgen_adapter_vendor_id == 0x1022)
+        SDL_strlcpy(app.renderer_name, "direct3d11-hdr10-amd",
+                    sizeof(app.renderer_name));
+    else if (pgen_adapter_vendor_id == 0x8086)
+        SDL_strlcpy(app.renderer_name, "direct3d11-hdr10-intel",
+                    sizeof(app.renderer_name));
+    else
+        SDL_strlcpy(app.renderer_name, "direct3d11-hdr10",
+                    sizeof(app.renderer_name));
     if (!app.hdr_active) {
         SDL_SetError("Windows HDR is not active on the selected display");
         windows_destroy_hdr_output();
@@ -3948,6 +3975,12 @@ static void companion_run_install(const char *poll_response)
                 SDL_Delay(250);
             }
             remove(result_path);
+            /* The loader has just cycled Advanced Color under our swapchain;
+             * schedule a renderer recreate before the next HDR patch so a
+             * composed-demoted presentation cannot poison the following
+             * meter reads. */
+            if (accepted)
+                SDL_SetAtomicInt(&app.presentation_recovery_pending, 1);
         }
     }
 #elif defined(__APPLE__)
@@ -4516,8 +4549,18 @@ static void process_network_updates(void)
     if (have_command) {
         bool ok;
 #ifdef _WIN32
-        bool refresh_fullscreen_hdr =
+        /* A completed profile install also forces the reset: the loader's
+         * Advanced Color cycle can leave this pre-existing swapchain demoted
+         * to composed presentation (Windows then tone-maps to the profile
+         * peak), and the size >= 100 gate below means windowed-patch sessions
+         * would otherwise never recover. Consuming it here keeps the reset in
+         * the inter-patch window, before the settle delay and meter read. */
+        bool install_recovery =
+            SDL_GetAtomicInt(&app.presentation_recovery_pending) != 0 &&
             app.fullscreen && !alignment && !strcmp(mode, "hdr10") &&
+            !preserve_hdr_calibration && app.hdr_swapchain;
+        bool refresh_fullscreen_hdr = install_recovery ||
+            (app.fullscreen && !alignment && !strcmp(mode, "hdr10") &&
             !preserve_hdr_calibration &&
             command_size >= 100 &&
             app.hdr_swapchain &&
@@ -4527,7 +4570,7 @@ static void process_network_updates(void)
              app.displayed_max_luma != max_luma ||
              app.displayed_min_luma != min_luma ||
              app.displayed_max_cll != max_cll ||
-             app.displayed_max_fall != max_fall);
+             app.displayed_max_fall != max_fall));
 #endif
         char message[256] = "";
         raise_pattern_window();
@@ -4549,6 +4592,7 @@ static void process_network_updates(void)
          * cannot sample this reset frame. Full-field OLED conditioning
          * commands opt out because recreating the HDR path can silently drop
          * the active Windows MHC2 calibration for every following patch. */
+        if (refresh_fullscreen_hdr) SDL_SetAtomicInt(&app.presentation_recovery_pending, 0);
         if (refresh_fullscreen_hdr &&
             (!try_create_renderer(false, NULL) ||
              (SDL_Delay(50), !create_renderer(true)))) ok = false;
@@ -4901,6 +4945,13 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
      * compositor idle-inhibit protocol for the lifetime of this window. */
     SDL_DisableScreenSaver();
 #ifdef _WIN32
+    /* Idle transitions degrade the HDR pipeline mid-session even with the
+     * screensaver off: unattended meter runs measured a tone-mapped panel
+     * until the session was interacted with. Assert a display requirement
+     * for the process lifetime; cleared in SDL_AppQuit. */
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+#endif
+#ifdef _WIN32
     set_windows_window_icon();
 #else
     set_embedded_window_icon();
@@ -5046,6 +5097,9 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result)
 {
+#ifdef _WIN32
+    SetThreadExecutionState(ES_CONTINUOUS);
+#endif
     AppState *state = (AppState *)appstate;
     (void)result;
     if (state) {

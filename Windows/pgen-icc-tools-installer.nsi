@@ -16,7 +16,7 @@ BrandingText "PGenerator+"
 Icon "..\favicon.ico"
 UninstallIcon "..\favicon.ico"
 
-VIProductVersion "1.4.20.0"
+VIProductVersion "1.4.21.0"
 VIAddVersionKey "ProductName" "PGenerator+ ICC Tools"
 VIAddVersionKey "FileDescription" "PGenerator+ Patch Companion and Profile Loader installer"
 VIAddVersionKey "FileVersion" "1.4.20"
@@ -82,7 +82,7 @@ Section "PGenerator+ Patch Companion and Profile Loader" SEC_CORE
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
               "DisplayName" "PGenerator+ ICC Tools"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
-              "DisplayVersion" "1.4.20"
+              "DisplayVersion" "1.4.21"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
               "Publisher" "PGenerator+"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PGeneratorPlusICCTools" \
