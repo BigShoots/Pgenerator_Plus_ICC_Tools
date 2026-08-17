@@ -697,3 +697,74 @@ Suggested order, worst-first rather than easiest-first:
 
 We are glad to open this as a PR in whatever shape is easiest to review —
 one branch, or split per section.
+
+---
+
+*Section 17 added 2026-08-17, from profcheck runs against two finished cLUT
+profiles. Unit-side rather than Companion-side, but the same silent-fault
+shape as §10 and §15, and the evidence lives in the profiles themselves.*
+
+## 17. Dark patches get contaminated readings, and the cLUT absorbs them
+
+Two XYZ cLUT + matrix profiles, both 425 patches, two displays, sixteen days
+apart, same i1Display Pro Plus:
+
+| | Dell U2723QE (2026-08-17) | ASUS VE228 (2026-08-01) |
+|---|---|---|
+| panel | IPS Black, wide gamut | 2011-era 6-bit TN |
+| profcheck avg ΔE | 0.757 | 0.758 |
+| profcheck RMS | 2.458 | 1.147 |
+| profcheck max ΔE | **30.06** | **12.76** |
+| impossible readings | ~9, clustered on the blue axis | 1 |
+
+profcheck here is each profile checked against its **own embedded `targ`
+data** — the tool ships in this package, so the whole check is one command.
+
+The identical averages are the healthy part: when the readings are honest, the
+pipeline fits them to ~0.76 ΔE on both a modern wide-gamut panel and a
+fourteen-year-old TN. The maxima are not fit error. They are measurements that
+cannot be what the display showed:
+
+```
+Dell  patch 209: stimulus (0, 0, 0.687)      recorded L* 74.8, a* 1.8, b* -17.7
+Dell  patch 208: stimulus (0, 0, 0.389)      recorded L* 49.7
+VE228 patch 384: stimulus (0.165, 0.123, 0.908) recorded L* 88.0, b* +25.6
+```
+
+Pure blue at full drive tops out around L* 33 on these panels. A 69% blue
+patch cannot read L* 75, and a dark blue-violet cannot read L* 88 with a
+positive b*. Every impossible reading, on both displays, is the same thing: a
+**bright, low-chroma value recorded against a dark, blue-heavy stimulus**.
+Two panels and two dates rule out placement and panel behaviour.
+
+**Hypothesis — consistent with both datasets, not directly observed.** The
+i1d3 auto-scales integration time, and dark patches take seconds where bright
+ones take fractions of one. The measurement sequence runs on fixed timing
+(`delay` 1000 ms, `pattern_delay` 500 ms here). When integration on a dark
+patch outruns its window, the tail integrates the *next, brighter* patch, and
+the contaminated read is bright and washed out — exactly the signature. The
+blue axis clusters because blue is the lowest-luminance primary, so its ramp
+holds the darkest patches in the set.
+
+Why only the cLUT suffers: a matrix+TRC fit regularises globally, so the
+95-patch Curves profile built the same day shrugged off its one glitch. The
+cLUT follows local data — that is its job — so it bends the blue axis around
+each bad reading and hands every colour-managed blue gradient the error.
+
+Mitigation that works today: raise the delays before a cLUT run (2000/1000
+cost about seven minutes over 425 patches), and profcheck before installing —
+blues clean and max ΔE under ~4 is the bar.
+
+The real fix is unit-side and cheap, because the generator knows what it
+displayed. Expected luminance for a stimulus is predictable within a factor of
+~2 from white luminance and a gamma guess before any profile exists. A dark
+patch that reads several times its expected Y is detectable **at measurement
+time** — discard and re-read, or read dark patches twice and accept on
+agreement. Today it is silently absorbed: the run completes, the averages look
+excellent, and the profile is quietly wrong along one axis. Nothing reports
+it — the same shape as §10 and §15.
+
+A smaller version, same spirit as §14's drift guard: run profcheck
+automatically at the end of every build — the WebUI has both the `.ti3` and
+the profile — and surface max ΔE with the worst patches. Either of our bad
+profiles would have announced itself in one line.
