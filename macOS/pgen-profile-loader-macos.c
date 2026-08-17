@@ -998,6 +998,12 @@ typedef enum {
 } LoaderAction;
 
 static SDL_AtomicInt pending_action;
+/* Set while the five-second verify owns the worker, cleared for anything the
+ * operator asked for. The UI greys its controls on worker_busy, and without
+ * this the periodic check made every button flicker disabled - and the Apply
+ * button read "Working..." - once every five seconds while nothing was
+ * happening. */
+static SDL_AtomicInt background_action;
 
 static bool path_is_in_icc_directory(const char *path);
 static bool place_in_user_icc(const char *source, char *target, size_t target_size,
@@ -1307,13 +1313,24 @@ static int SDLCALL worker_main(void *unused)
 
 /* Every action shells out to a tool that can take a second or more, so run it
  * off the event loop and keep the window drawing. */
-static void start_action(LoaderAction action)
+static void start_action_as(LoaderAction action, bool background)
 {
-    if (SDL_GetAtomicInt(&app.worker_busy)) return;
+    if (SDL_GetAtomicInt(&app.worker_busy)) {
+        /* Never let the periodic verify displace a running job, but do let an
+         * operator's action supersede the verify: it is a directory rescan and
+         * one profile comparison, so joining it costs a few milliseconds and
+         * the click is honoured instead of silently dropped. */
+        if (background || !SDL_GetAtomicInt(&background_action)) return;
+        if (app.worker) {
+            SDL_WaitThread(app.worker, NULL);
+            app.worker = NULL;
+        }
+    }
     if (app.worker) {
         SDL_WaitThread(app.worker, NULL);
         app.worker = NULL;
     }
+    SDL_SetAtomicInt(&background_action, background ? 1 : 0);
     SDL_SetAtomicInt(&pending_action, (int)action);
     SDL_SetAtomicInt(&app.worker_busy, 1);
     app.worker = SDL_CreateThread(worker_main, "PGen loader worker", NULL);
@@ -1321,6 +1338,11 @@ static void start_action(LoaderAction action)
         SDL_SetAtomicInt(&app.worker_busy, 0);
         worker_main(NULL);
     }
+}
+
+static void start_action(LoaderAction action)
+{
+    start_action_as(action, false);
 }
 
 /* ---------------------------------------------------------------- rendering */
@@ -1871,7 +1893,8 @@ static void draw_ui(void)
     const float width = app.window_w - UI_MARGIN * 2.0f;
     const float right = left + width;
     float y = UI_MARGIN - app.scroll_y;
-    bool busy = SDL_GetAtomicInt(&app.worker_busy) != 0;
+    bool busy = SDL_GetAtomicInt(&app.worker_busy) != 0 &&
+                SDL_GetAtomicInt(&background_action) == 0;
 
     fill_rect(0, 0, app.window_w, app.window_h, pal.background);
     fill_rect(0, 0, app.window_w, 3.0f, pal.accent);
@@ -2705,7 +2728,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         snapshot_sdl_displays();
         maybe_self_heal();
         update_tray();
-        start_action(ACTION_REFRESH);
+        start_action_as(ACTION_REFRESH, true);
     }
     return SDL_APP_CONTINUE;
 }
