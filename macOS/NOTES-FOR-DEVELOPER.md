@@ -584,6 +584,22 @@ by level rather than by ordering, so it cannot be buried by a click elsewhere.
 screen back, and the next patch re-asserts it. That ordering is deliberate: a
 patch on screen has to be visible to be worth measuring.
 
+**This one is shared code, and that is deliberate — but only the macOS half is
+tested.** The `app.fullscreen` → `true` change sits in
+`raise_pattern_window()`, so Windows and Linux windowed mode now float too.
+That cuts against the rule stated above for the activation split, so here is
+the reasoning: the fault this fixes is platform-independent — whatever covers
+the patch is what the meter reads — and Windows windowed mode had the
+identical silent bug, previously masked there by the per-patch
+`SetForegroundWindow`. On Wayland the call is likely a no-op, since stacking
+belongs to the compositor. But "likely correct" is not "verified": neither
+platform has been tested with this change, and floating is a smaller, more
+predictable behaviour than activation, which is why this one crossed the line
+the activation split would not. If an untested Windows change is unwanted in
+review, gating the `true` behind `PGEN_MACOS` and keeping `app.fullscreen`
+elsewhere preserves the old behaviour exactly — at the cost of knowingly
+leaving the covered-patch fault in place on Windows windowed mode.
+
 **Unrelated papercut found while testing.** The "Select profiling display"
 prompt is modal and blocks startup until answered, and the choice is never
 persisted — `save_config()` writes a `DISPLAY` key, but nothing populates it
