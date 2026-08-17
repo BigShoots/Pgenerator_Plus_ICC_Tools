@@ -3543,6 +3543,13 @@ static bool windows_set_borderless_windowed(bool fullscreen)
 }
 #endif
 
+/* Keeps the patch window unobscured. Window level only - no application
+ * activation - so this is safe on the path every patch takes.
+ *
+ * The Windows branch stays here deliberately. It has the same shape as the
+ * macOS activation that moved out of this function and probably wants the same
+ * split, but that cannot be tested from this platform, and an untested change
+ * to the path every Windows patch takes is worse than the inconsistency. */
 static void raise_pattern_window(void)
 {
     SDL_SetWindowAlwaysOnTop(app.window, app.fullscreen);
@@ -3558,9 +3565,26 @@ static void raise_pattern_window(void)
         }
     }
 #endif
+}
+
+/* Visibility plus application activation, for the two deliberate moments:
+ * taking the screen when a series starts, and the operator's own fullscreen
+ * toggle.
+ *
+ * Activation is what keeps F11 and Escape working, since SDL_RaiseWindow can
+ * bring the window forward without giving it key focus. It also takes focus
+ * from whatever else the operator is doing, on every display, which is why it
+ * must not sit on the per-patch path: a 425-patch run called it 425 times and
+ * made the second display unusable for the length of the run.
+ *
+ * The cost of moving it here is that those keys stop responding once the
+ * operator clicks away. Clicking the patch window restores them. Recovering
+ * them without focus would need a global NSEvent monitor, which requires
+ * Accessibility permission - a far larger imposition than the keys are worth. */
+static void activate_pattern_window(void)
+{
+    raise_pattern_window();
 #ifdef PGEN_MACOS
-    /* SDL_RaiseWindow can bring the window forward without giving it key
-     * focus, which loses F11 and Escape mid-series. */
     pgen_macos_activate_window(app.window);
 #endif
 }
@@ -3588,7 +3612,10 @@ static bool apply_display_settings(bool fullscreen, int patch_size)
     }
 #endif
     app.displayed_size = patch_size;
-    raise_pattern_window();
+    /* Only reached on a deliberate change - a new settings revision, the
+     * deferred first pattern, or the operator's own toggle - so taking focus
+     * here is wanted. */
+    activate_pattern_window();
     return render_current_frame();
 }
 
@@ -5194,7 +5221,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
     }
     if (event->type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN) {
         state->fullscreen = true;
-        raise_pattern_window();
+        activate_pattern_window();
         render_current_frame();
     }
     if (event->type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN) {

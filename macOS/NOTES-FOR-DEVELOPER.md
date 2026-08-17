@@ -483,3 +483,76 @@ The conservative version of this feature is worth having on its own: read the
 monitor's brightness at the start of a run, and refuse or warn if it changes
 before the end. That fixes by prevention the drift the meter probes can
 currently only detect after the fact, and needs no write path at all.
+
+---
+
+*Section 15 added 2026-08-17, with a patch. Reported by an operator who could
+not use the second display for the length of a run.*
+
+## 15. The Companion steals focus on every patch — and SDL is half of it
+
+On macOS a running series made the *other* display unusable: every patch
+brought the Companion to the front and took key focus from whatever else was
+open. A 425-patch run does that 425 times.
+
+`raise_pattern_window()` sits on the per-patch path, reached from
+`process_network_updates()` for every pattern command, and it was doing two
+separable things — holding the window above others, which every patch needs,
+and activating the application, which no patch needs.
+
+**The part that is not obvious.** Deleting the explicit
+`pgen_macos_activate_window()` call from that path is necessary and **not
+sufficient**. `SDL_RaiseWindow` is documented as raising the window *and*
+giving it input focus, and `SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED` and
+`SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN` both default to `"1"`. With the explicit
+activation gone and the hints left alone, the window still took focus on every
+patch — measured, not assumed. Both hints are now set to `"0"` in
+`pgen_macos_early_init()`.
+
+The change is a split, not a removal:
+
+- `raise_pattern_window()` — always-on-top, show, raise. No activation. Runs
+  per patch.
+- `activate_pattern_window()` — the above plus `[NSApp activate]`. Runs at the
+  deliberate moments only: `apply_display_settings()`, which is reached on a
+  new settings revision, the deferred first pattern, or the operator's own
+  toggle; and `SDL_EVENT_WINDOW_ENTER_FULLSCREEN`.
+
+Verified on a live series against a real unit, with Finder deliberately in
+front:
+
+```
+baseline frontmost: Finder
+  patch 255  rendered=[1, 1, 1]              frontmost=Finder
+  patch 0    rendered=[0, 0, 0]              frontmost=Finder
+  patch 200  rendered=[0.784314, ...]        frontmost=Finder
+  ... 8 patches, focus never left Finder
+```
+
+and separately, that taking the screen still works — launching with Finder in
+front left the Companion frontmost once connected, so Escape and F11 are live
+when a series starts.
+
+Check `source_rgb` alongside the frontmost app when re-testing this. Our first
+"passing" run was worthless: the Companion had not reconnected, so nothing was
+rendering and of course nothing took focus. A focus test only means something
+while the window is actually painting patches.
+
+**The tradeoff.** Escape and F11 stop responding once the operator clicks away
+mid-series, and clicking the patch window restores them. Recovering the keys
+without focus needs a global `NSEvent` monitor and therefore Accessibility
+permission, which is a far larger imposition than the keys are worth.
+
+**Windows is deliberately untouched.** `windows_activate_pattern_window()` has
+the same shape and is still on the per-patch path, so the same bug is probably
+there. It could not be tested from this platform, and an untested change to the
+path every Windows patch takes is worse than the inconsistency. Worth someone
+with a Windows unit checking whether `SetForegroundWindow` there costs the
+operator their other display too.
+
+**Unrelated papercut found while testing.** The "Select profiling display"
+prompt is modal and blocks startup until answered, and the choice is never
+persisted — `save_config()` writes a `DISPLAY` key, but nothing populates it
+from that prompt, so every launch asks again. `--display="DELL U2723QE"` skips
+it, which is what made scripted testing possible at all. Persisting the answer
+would make an unattended relaunch mid-session actually unattended.

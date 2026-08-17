@@ -77,6 +77,24 @@ void pgen_macos_early_init(int argc, char *argv[])
      * bounds and hides the menu bar synchronously. */
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_MENU_VISIBILITY, "0");
+
+    /* These two can be set at any time; they are here to keep the window
+     * policy in one place.
+     *
+     * SDL_RaiseWindow and SDL_ShowWindow both activate the application by
+     * default - SDL_RaiseWindow is documented as raising the window *and*
+     * giving it input focus. raise_pattern_window() calls both, and runs for
+     * every patch, so with the defaults a series steals focus once per patch
+     * no matter what the application does. Removing the explicit [NSApp
+     * activate] from that path is necessary but not sufficient; measured
+     * against a running series, the window still took focus on every patch
+     * until these were turned off.
+     *
+     * Turning them off does not lose the deliberate case: activate_pattern_
+     * window() calls [NSApp activate] itself, so taking the screen at the
+     * start of a series and the operator's own fullscreen toggle still work. */
+    SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
+    SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
 }
 
 const char *pgen_macos_platform_string(void)
