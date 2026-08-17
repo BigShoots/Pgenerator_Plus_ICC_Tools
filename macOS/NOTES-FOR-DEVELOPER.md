@@ -172,7 +172,7 @@ display, asking for red:
   confusion, since the current message reads like a transient state.
 
 
-## 9. The v1.4.19 macOS build may not be able to pair with a current unit
+## 9. The macOS build cannot pair with a current unit — now confirmed on hardware
 
 Verified on our side, worth checking on yours: the macOS Companion reports
 `"platform":"macos"` in its pair request (confirmed by running the shipped
@@ -190,8 +190,44 @@ carry it as a patch (with optional WebUI wording for a macos case: download
 asset map, OS sniff, the "Compositor profile handling (KWin)" label) and can
 send it over.
 
-We haven't been able to test against a real unit yet, so if your units already
-have this server-side, ignore this section entirely.
+**Confirmed against a real unit on 2026-08-17** (unit reporting
+`shipped_version 1.4.14.1`), by POSTing to `/api/icc/companion/pair-request`
+directly, so the result is the server's and not the Companion's:
+
+```
+{"client":"probe","platform":"macos","version":"1.4.20"}
+  -> {"status":"error","message":"Invalid pairing request"}
+
+{"client":"probe","platform":"windows","version":"1.4.20"}
+  -> {"status":"pending","request":"e7b8b2b5…","code":"276502","expires_in":180}
+```
+
+Same request, one field different. The request never reaches the WebUI, so
+`pair_requests` in `/api/icc/companion/status` stays empty and the operator has
+nothing to approve — there is no failure to see from the unit's side at all.
+
+Until the server-side patch lands, `--platform-compat=windows` is the way
+through — but **only for a binary built from this fork.** The released
+upstream v1.4.20 DMG does not carry the flag:
+
+```
+$ strings -a PGenPatchCompanion | grep platform-compat   # nothing
+$ strings -a PGenPatchCompanion | grep -x -E 'macos|windows|linux'
+macos
+```
+
+`macos` is its only platform literal, so there is nothing for the flag to
+select even if it parsed. Unrecognised arguments are ignored silently, so
+passing `--platform-compat=windows` to that build looks like it worked and
+still fails with "Invalid pairing request" — which is a worse failure than
+not having the flag at all, because it costs the user the one workaround they
+were told to try. Building from this fork fixed it immediately.
+
+Worth stating in the README where users will find it: the flag is argv-only,
+since `pgen_macos_early_init()` reads it from the command line and
+`load_config()` only consults the conf file for `SERVER`, `TOKEN` and
+`DISPLAY`. Putting it in `PGenPatchCompanion.conf` is the obvious first guess
+and it silently does nothing.
 
 ---
 
@@ -285,3 +321,101 @@ One caveat if you go looking: `CoreDisplay_Display_CopyPresetUniqueID` did not
 track the active preset for us — it kept returning the first entry after the
 preset had actually changed. A luminance measurement caught it. Enumeration
 works; identifying the active one through that call did not.
+
+---
+
+*Section 12 added 2026-08-17, from a clean install of the released v1.4.20 DMG
+on a Mac that had never run the tools before.*
+
+## 12. Running from the mounted DMG cannot work — Gatekeeper blocks the dylib
+
+A first-time user who downloads the DMG, mounts it and runs `PGenPatchCompanion`
+where it sits — which is what the README's instructions read as, since we ship a
+bare binary rather than a bundle — gets no window and no error dialog. The
+process dies at launch:
+
+```
+Library not loaded: @loader_path/libSDL3.0.dylib
+Reason: tried: '/Volumes/PGenerator+ ICC Tools/…/libSDL3.0.dylib'
+        (code signature not valid for use in process:
+         library load disallowed by system policy)
+```
+
+`termination: DYLD, Library missing`, `SIGABRT`, before `main`. Both the binary
+and `libSDL3.0.dylib` are adhoc-signed with no Team ID, and the disk image
+carries `com.apple.quarantine` from the browser. Gatekeeper permits the adhoc
+main executable but refuses the adhoc dylib load off a quarantined volume, so
+the dependency never resolves. Reproduced on macOS 26.5.2 (25F84), arm64.
+
+This presents to the user as "the app does nothing" or, if they had got as far
+as expecting a code, "it won't pair" — the crash log is the only evidence, and
+nothing points them at it.
+
+The install is: copy the folder off the image first, then clear quarantine.
+
+```sh
+cp -R "/Volumes/PGenerator+ ICC Tools/PGenerator+ ICC Tools" ~/Applications/
+chmod -R u+w "$HOME/Applications/PGenerator+ ICC Tools"
+xattr -dr com.apple.quarantine "$HOME/Applications/PGenerator+ ICC Tools"
+```
+
+The `chmod` is not optional and is easy to miss. `libSDL3.0.dylib` is mode 444
+on the image, the copy preserves it, and `xattr -dr` then fails on that one
+file while succeeding on every other — leaving the exact file whose quarantine
+matters still quarantined, and the failure unchanged. It looks like the fix
+didn't work.
+
+Worth fixing at the source rather than in documentation, in rough order of how
+much it would help:
+
+- Ship a `.app` bundle and notarize it. Removes this entirely, and gives §6 its
+  `Info.plist` at the same time.
+- Failing that, make the DMG's window a drag-to-`/Applications` layout, so the
+  copy is the obvious gesture rather than an undocumented prerequisite.
+- Either way, write the files mode 644 into the image, so a `xattr -dr` on the
+  copied folder does what the person running it thinks it did.
+- A `README.txt` on the image saying "copy this folder out before running" would
+  cost nothing and covers the case where someone runs it in place anyway.
+
+## 13. If you do bundle, `save_config()` will break the signature
+
+Found while acting on the first suggestion above, so it is a prerequisite for
+it rather than a separate issue.
+
+`save_config()` writes `PGenPatchCompanion.conf` to `SDL_GetBasePath()` first.
+For a `.app` that path is `Contents/Resources`, which is inside the sealed
+bundle. The write succeeds, and the next `codesign --verify` fails:
+
+```
+PGeneratorPlusPatchCompanion.app: a sealed resource is missing or invalid
+```
+
+So the app is correctly signed when shipped, and invalidates its own signature
+the moment a user pairs — the one action every first-run user performs. An
+adhoc-signed app still launches that way, which is why this is easy to miss,
+but it will not survive notarization or a quarantined copy.
+
+`Contents/Resources` is the right home for `colprof`, `profcheck` and the
+nested Loader, since `companion_tool_path()` also uses `SDL_GetBasePath()` and
+those are read-only at runtime. It is the wrong home for the one file that
+gets written.
+
+The fallback is already there and already correct — `save_config()` drops to
+`SDL_GetPrefPath()` when the base path cannot be written, which is the
+Program Files case the comment describes. Making it fire on macOS took only
+denying writes to the directory:
+
+```sh
+chmod u-w "PGeneratorPlusPatchCompanion.app/Contents/Resources"
+```
+
+Do that after signing; `codesign` seals file contents, not directory modes, so
+the signature stays valid across the change and across a pairing run. Verified:
+paired, token written to `~/Library/Application Support/PGeneratorPlus/
+PatchCompanion/`, seal still valid, and a relaunch reconnected on the saved
+token without re-pairing.
+
+Cleaner still would be preferring `SDL_GetPrefPath()` for writes on macOS and
+leaving the base path read-only by construction, rather than relying on a
+permission bit to force the fallback. Worth deciding before a bundle ships,
+because the `chmod` is invisible and nothing in the build enforces it.
