@@ -1,0 +1,159 @@
+# Build both Windows packages from source and verify that their bundled
+# colprof.exe comes from the pinned ICC 4.4 fork. The version banner alone is
+# insufficient because stock and patched ArgyllCMS builds both report 3.5.0.
+
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-windows.yml"
+      - ".gitmodules"
+      - "Common/**"
+      - "Windows/**"
+      - "licenses/**"
+      - "vendor/ArgyllCMS_ICC4.4"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SDL3_VERSION: "3.4.14"
+      ARGYLL_COMMIT: "0613c3f778a2ad60a511e9a687bac4da1ef20184"
+      ICC44_HELP: "-4              Create ICC v4.4 RGB display profile with CICP 9-16-0-1"
+    steps:
+      - name: Check out ICC Tools and pinned ArgyllCMS
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64 jam nsis \
+            p7zip-full unzip zip
+
+      - name: Verify the ArgyllCMS source pin
+        run: |
+          test "$(git -C vendor/ArgyllCMS_ICC4.4 rev-parse HEAD)" = "${ARGYLL_COMMIT}"
+          grep -F -- "${ICC44_HELP}" vendor/ArgyllCMS_ICC4.4/profile/colprof.c
+
+      - name: Build patched ArgyllCMS tools for Windows x64
+        run: |
+          # The fork contains armhf build products. Never let Jam accept a
+          # foreign artifact as current in a Windows package build.
+          find vendor/ArgyllCMS_ICC4.4 -type f \
+            \( -name '*.o' -o -name '*.a' -o -name '*.obj' -o -name '*.lib' \) \
+            -delete
+          rm -f vendor/ArgyllCMS_ICC4.4/profile/colprof \
+                vendor/ArgyllCMS_ICC4.4/profile/profcheck \
+                vendor/ArgyllCMS_ICC4.4/profile/colprof.exe \
+                vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe
+
+          # Jambase selects MinGW by looking for this Windows-style filename.
+          # The actual compiler and linker are the distro cross tools.
+          MINGW_STUB="${RUNNER_TEMP}/pgen-mingw"
+          mkdir -p "${MINGW_STUB}/bin" "${MINGW_STUB}/include"
+          ln -s "$(command -v x86_64-w64-mingw32-gcc)" \
+                "${MINGW_STUB}/bin/x86_64-w64-mingw32-gcc.exe"
+
+          JAM_BIN="$(command -v jam || command -v jam.perforce)"
+          (
+            cd vendor/ArgyllCMS_ICC4.4
+            "${JAM_BIN}" -q -fJambase \
+              -sUNIX= -sNT=1 -sMINGW="${MINGW_STUB}" -sSLASH=/ \
+              -sCP=cp -sMV='mv -f' -sRM='rm -f' -sRMDIR='rm -rf' \
+              -sLINK=x86_64-w64-mingw32-gcc \
+              '<profile>colprof' '<profile>profcheck'
+          )
+
+          file vendor/ArgyllCMS_ICC4.4/profile/colprof.exe \
+               vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe
+          file vendor/ArgyllCMS_ICC4.4/profile/colprof.exe | grep -q 'PE32+.*x86-64'
+          file vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe | grep -q 'PE32+.*x86-64'
+          strings vendor/ArgyllCMS_ICC4.4/profile/colprof.exe | grep -F -- "${ICC44_HELP}"
+
+      - name: Download SDL3 MinGW development package
+        run: |
+          curl -fsSLO \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL3_VERSION}/SDL3-devel-${SDL3_VERSION}-mingw.tar.gz"
+          tar xzf "SDL3-devel-${SDL3_VERSION}-mingw.tar.gz"
+          echo "SDL3=${GITHUB_WORKSPACE}/SDL3-${SDL3_VERSION}/x86_64-w64-mingw32" >> "${GITHUB_ENV}"
+
+      - name: Build Windows applications
+        run: |
+          (
+            cd Windows
+            x86_64-w64-mingw32-windres pgen-icc-companion.rc \
+              -O coff -o ../companion_rc.o
+            x86_64-w64-mingw32-windres pgen-profile-loader.rc \
+              -O coff -o ../loader_rc.o
+          )
+
+          x86_64-w64-mingw32-gcc -O2 -std=gnu11 -DUNICODE -D_UNICODE \
+            -DSDL_MAIN_CALLBACK_STANDARD -I"${SDL3}/include" -ILinux \
+            Common/pgen-icc-companion.c companion_rc.o \
+            -o PGeneratorPlusPatchCompanion.exe -L"${SDL3}/lib" \
+            -municode -mwindows \
+            -lSDL3 -ldxguid -lws2_32 -ld3d11 -ldxgi -lcomctl32 -lmscms \
+            -lole32 -luuid -lgdi32 -luser32 -lshell32 -ladvapi32 -lshlwapi \
+            -ldwmapi
+
+          x86_64-w64-mingw32-gcc -O2 -std=gnu11 -DUNICODE -D_UNICODE \
+            Windows/pgen-profile-loader.c loader_rc.o \
+            -o PGenProfileLoader.exe -municode -mwindows \
+            -lcomctl32 -lcomdlg32 -lshell32 -lmscms -luxtheme -ldwmapi \
+            -lsetupapi -lgdi32 -luser32 -ladvapi32 -lole32 -luuid
+
+      - name: Assemble installer and portable archive
+        run: |
+          STAGE="icc-companion/windows-x64"
+          mkdir -p "${STAGE}" bundle dist
+          cp PGeneratorPlusPatchCompanion.exe PGenProfileLoader.exe "${STAGE}/"
+          cp "${SDL3}/bin/SDL3.dll" "${STAGE}/"
+          cp vendor/ArgyllCMS_ICC4.4/profile/colprof.exe \
+             vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe "${STAGE}/"
+          cp licenses/SDL3-LICENSE.txt licenses/DejaVu-LICENSE.txt \
+             licenses/ArgyllCMS-LICENSE.txt icc-companion/
+
+          (cd Windows && makensis pgen-icc-tools-installer.nsi)
+          cp "${STAGE}/PGeneratorPlusICCSetup.exe" \
+             dist/PGeneratorPlus-ICC-Tools-Windows-x64.exe
+
+          cp Windows/README.txt Windows/PROFILE-LOADER-README.txt \
+             Windows/PGenPatchCompanion.template.conf bundle/
+          cp icc-companion/SDL3-LICENSE.txt icc-companion/DejaVu-LICENSE.txt \
+             icc-companion/ArgyllCMS-LICENSE.txt bundle/
+          cp "${STAGE}/PGeneratorPlusPatchCompanion.exe" \
+             "${STAGE}/PGenProfileLoader.exe" "${STAGE}/SDL3.dll" \
+             "${STAGE}/colprof.exe" "${STAGE}/profcheck.exe" bundle/
+          (cd bundle && zip -X ../dist/PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip *)
+
+      - name: Verify both packaged ArgyllCMS payloads
+        run: |
+          unzip -p dist/PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip \
+            colprof.exe > portable-colprof.exe
+          7z x -y -oinstaller-files \
+            dist/PGeneratorPlus-ICC-Tools-Windows-x64.exe colprof.exe
+
+          for packaged in portable-colprof.exe installer-files/colprof.exe; do
+            file "${packaged}" | grep -q 'PE32+.*x86-64'
+            strings "${packaged}" | grep -F -- "${ICC44_HELP}"
+            cmp "${packaged}" vendor/ArgyllCMS_ICC4.4/profile/colprof.exe
+          done
+
+          sha256sum dist/PGeneratorPlus-ICC-Tools-Windows-x64.exe \
+                    dist/PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip \
+            > dist/SHA256SUMS-Windows
+          cat dist/SHA256SUMS-Windows
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: PGeneratorPlus-ICC-Tools-Windows-x64
+          path: dist/
+          if-no-files-found: error
