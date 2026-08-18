@@ -24,9 +24,17 @@ warning.
 
 ## Current release
 
-Version 1.4.21 is paired with the current PGenerator+ build. The desktop tools
+Version 1.4.22 is paired with the current PGenerator+ build. The desktop tools
 in this release:
 
+- restore and verify the active Windows MHC2 stage after HDR presentation
+  changes before acknowledging a measurement patch;
+- perform the recovery handoff on the selected display, keeping foreground
+  recovery independent of another application or monitor;
+- keep an exact-neutral cLUT endpoint on the measured MHC2 shoulder only when
+  the profile contains a genuinely held highlight plateau;
+- queue profile applies received during an Advanced Color reload so the newest
+  build or fine-tune profile always wins;
 - preserve Windows MHC2 correction while OLED protection patches are inserted;
 - classify Windows SDR and Advanced Color profile associations from ICC
   content, including PGenerator+'s explicit association marker, instead of
