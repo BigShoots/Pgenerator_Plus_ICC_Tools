@@ -78,6 +78,9 @@ including the ICC 4.4/CICP support and the Linux parallel B2A table builder.
 The Windows package workflow cross-builds both executables from that submodule
 and rejects the installer and portable archive unless their packaged
 `colprof.exe` advertises the patched `-4` ICC 4.4 option.
+The macOS arm64 workflow is pinned to the same commit and rejects its archive
+unless the packaged `colprof` is arm64, byte-identical to that build, and
+advertises the same ICC 4.4 option.
 The release `SHA256SUMS` file covers all downloads.
 
 ### Installing a completed profile from the WebUI

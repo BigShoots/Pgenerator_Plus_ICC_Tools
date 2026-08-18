@@ -18,6 +18,8 @@ jobs:
     runs-on: macos-14
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
+      ARGYLL_COMMIT: "0613c3f778a2ad60a511e9a687bac4da1ef20184"
+      ICC44_HELP: "-4              Create ICC v4.4 RGB display profile with CICP 9-16-0-1"
     steps:
       - name: Check out ICC Tools
         uses: actions/checkout@v4
@@ -26,8 +28,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: BigShoots/ArgyllCMS_ICC4.4
-          ref: feature/icc44-cicp
+          ref: ${{ env.ARGYLL_COMMIT }}
           path: argyll
+
+      - name: Verify the ArgyllCMS source pin
+        run: |
+          test "$(git -C argyll rev-parse HEAD)" = "${ARGYLL_COMMIT}"
+          grep -F -- "${ICC44_HELP}" argyll/profile/colprof.c
 
       - name: Install SDL3
         run: |
@@ -79,8 +86,7 @@ jobs:
           file profile/colprof | grep -q arm64
           file profile/profcheck | grep -q arm64
           (./profile/colprof 2>&1 || true) | grep -m1 Version
-          (./profile/colprof 2>&1 || true) | grep -F -- \
-            '-4              Create ICC v4.4 RGB display profile with CICP 9-16-0-1'
+          (./profile/colprof 2>&1 || true) | grep -F -- "${ICC44_HELP}"
           (./profile/profcheck 2>&1 || true) | grep -m1 Version
 
       - name: Build Profile Loader
@@ -122,6 +128,10 @@ jobs:
                    bundle/colprof bundle/profcheck
           (cd bundle && zip -X -r ../PGeneratorPlus-ICC-Tools-macOS-arm64.zip .)
           unzip -l PGeneratorPlus-ICC-Tools-macOS-arm64.zip
+          unzip -p PGeneratorPlus-ICC-Tools-macOS-arm64.zip colprof > packaged-colprof
+          file packaged-colprof | grep -q arm64
+          strings packaged-colprof | grep -F -- "${ICC44_HELP}"
+          cmp packaged-colprof argyll/profile/colprof
           # The native download format: a compressed disk image of the same
           # bundle, staged under a folder name so the volume shows one item.
           mkdir -p dmgroot
