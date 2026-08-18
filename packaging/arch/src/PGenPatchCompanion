@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# Resolve symlinks first: the packaged /usr/bin entry is a symlink into
+# /opt/pgen-icc-tools, and a plain dirname "$0" made this wrapper look for
+# the binary beside the symlink instead of beside itself.
+self=$(readlink -f -- "$0" 2>/dev/null) || self=$0
+app_dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd) || exit 1
+export LD_LIBRARY_PATH="$app_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$app_dir/PGenPatchCompanion.bin" "$@"
