@@ -24,9 +24,14 @@ warning.
 
 ## Current release
 
-Version 1.4.23 is paired with the current PGenerator+ build. The desktop tools
+Version 1.4.24 is paired with the current PGenerator+ build. The desktop tools
 in this release:
 
+- restore an interrupted Windows correction isolation before accepting a new
+  explicit cLUT request, preventing a cold start from caching the temporary
+  vendor fallback profile;
+- retry the requested explicit correction after that recovery completes,
+  without requiring a settings toggle or another application on the display;
 - isolate Windows' selected-monitor profile stage while explicit cLUT, matrix,
   or no-correction handling is active, so each test uses only the correction
   path selected by the operator;
