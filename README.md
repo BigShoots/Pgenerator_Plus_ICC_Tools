@@ -24,9 +24,16 @@ warning.
 
 ## Current release
 
-Version 1.4.22 is paired with the current PGenerator+ build. The desktop tools
+Version 1.4.23 is paired with the current PGenerator+ build. The desktop tools
 in this release:
 
+- isolate Windows' selected-monitor profile stage while explicit cLUT, matrix,
+  or no-correction handling is active, so each test uses only the correction
+  path selected by the operator;
+- evaluate the profile's B2A0 transform directly for cLUT handling without
+  substituting MHC2 neutral curves or applying an MHC2 inverse;
+- restore the selected monitor's saved Windows profile scope and association
+  when explicit correction ends or a new profile is installed;
 - restore and verify the active Windows MHC2 stage after HDR presentation
   changes before acknowledging a measurement patch;
 - perform the recovery handoff on the selected display, keeping foreground
