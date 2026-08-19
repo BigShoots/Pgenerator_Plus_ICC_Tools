@@ -24,9 +24,14 @@ warning.
 
 ## Current release
 
-Version 1.4.24 is paired with the current PGenerator+ build. The desktop tools
+Version 1.4.25 is paired with the current PGenerator+ build. The desktop tools
 in this release:
 
+- recover and verify Windows Advanced Color when an upgrade interrupts the
+  disable/re-enable reload cycle, including the case where DXGI initially
+  reports HDR as off;
+- start the newly installed Profile Loader after silent and interactive
+  upgrades so persisted correction isolation is restored before use;
 - restore an interrupted Windows correction isolation before accepting a new
   explicit cLUT request, preventing a cold start from caching the temporary
   vendor fallback profile;

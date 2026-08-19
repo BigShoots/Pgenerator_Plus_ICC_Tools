@@ -1,5 +1,5 @@
 pkgname=pgen-icc-tools-bin
-pkgver=1.4.24
+pkgver=1.4.25
 pkgrel=1
 pkgdesc='PGenerator+ Patch Companion and display profile loader'
 arch=('x86_64')
@@ -11,7 +11,7 @@ optdepends=('kscreen: apply profiles to KDE Plasma displays'
 provides=('pgen-icc-tools')
 conflicts=('pgen-icc-tools')
 source=("PGeneratorPlus-ICC-Tools-Linux-x64.zip::${url}/releases/download/v${pkgver}/PGeneratorPlus-ICC-Tools-Linux-x64.zip")
-sha256sums=('42534b5813c15877f837fb4f9c61041ae344ade5d5329a2de9fc0d7b06ff08ba')
+sha256sums=('3082304dbc0afd77a644e462b099e871e5d3608bb5b7d34acd5d53556cf85d1b')
 
 package() {
   install -d "$pkgdir/opt/pgen-icc-tools" "$pkgdir/usr/bin"
