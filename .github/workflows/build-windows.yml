@@ -1,5 +1,5 @@
 # Build both Windows packages from source and verify that their bundled
-# colprof.exe comes from the pinned ICC 4.4 fork. The version banner alone is
+# Argyll tools come from the pinned ICC 4.4 fork. The version banner alone is
 # insufficient because stock and patched ArgyllCMS builds both report 3.5.0.
 
 name: build-windows
@@ -52,7 +52,9 @@ jobs:
           rm -f vendor/ArgyllCMS_ICC4.4/profile/colprof \
                 vendor/ArgyllCMS_ICC4.4/profile/profcheck \
                 vendor/ArgyllCMS_ICC4.4/profile/colprof.exe \
-                vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe
+                vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe \
+                vendor/ArgyllCMS_ICC4.4/target/targen \
+                vendor/ArgyllCMS_ICC4.4/target/targen.exe
 
           # Jambase selects MinGW by looking for this Windows-style filename.
           # The actual compiler and linker are the distro cross tools.
@@ -68,13 +70,15 @@ jobs:
               -sUNIX= -sNT=1 -sMINGW="${MINGW_STUB}" -sSLASH=/ \
               -sCP=cp -sMV='mv -f' -sRM='rm -f' -sRMDIR='rm -rf' \
               -sLINK=x86_64-w64-mingw32-gcc \
-              '<profile>colprof' '<profile>profcheck'
+              '<profile>colprof' '<profile>profcheck' '<target>targen'
           )
 
           file vendor/ArgyllCMS_ICC4.4/profile/colprof.exe \
-               vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe
+               vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe \
+               vendor/ArgyllCMS_ICC4.4/target/targen.exe
           file vendor/ArgyllCMS_ICC4.4/profile/colprof.exe | grep -q 'PE32+.*x86-64'
           file vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe | grep -q 'PE32+.*x86-64'
+          file vendor/ArgyllCMS_ICC4.4/target/targen.exe | grep -q 'PE32+.*x86-64'
           strings vendor/ArgyllCMS_ICC4.4/profile/colprof.exe | grep -F -- "${ICC44_HELP}"
 
       - name: Download SDL3 MinGW development package
@@ -116,7 +120,8 @@ jobs:
           cp PGeneratorPlusPatchCompanion.exe PGenProfileLoader.exe "${STAGE}/"
           cp "${SDL3}/bin/SDL3.dll" "${STAGE}/"
           cp vendor/ArgyllCMS_ICC4.4/profile/colprof.exe \
-             vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe "${STAGE}/"
+             vendor/ArgyllCMS_ICC4.4/profile/profcheck.exe \
+             vendor/ArgyllCMS_ICC4.4/target/targen.exe "${STAGE}/"
           cp licenses/SDL3-LICENSE.txt licenses/DejaVu-LICENSE.txt \
              licenses/ArgyllCMS-LICENSE.txt icc-companion/
 
@@ -130,7 +135,8 @@ jobs:
              icc-companion/ArgyllCMS-LICENSE.txt bundle/
           cp "${STAGE}/PGeneratorPlusPatchCompanion.exe" \
              "${STAGE}/PGenProfileLoader.exe" "${STAGE}/SDL3.dll" \
-             "${STAGE}/colprof.exe" "${STAGE}/profcheck.exe" bundle/
+             "${STAGE}/colprof.exe" "${STAGE}/profcheck.exe" \
+             "${STAGE}/targen.exe" bundle/
           (cd bundle && zip -X ../dist/PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip *)
 
       - name: Verify both packaged ArgyllCMS payloads
@@ -138,13 +144,18 @@ jobs:
           unzip -p dist/PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip \
             colprof.exe > portable-colprof.exe
           7z x -y -oinstaller-files \
-            dist/PGeneratorPlus-ICC-Tools-Windows-x64.exe colprof.exe
+            dist/PGeneratorPlus-ICC-Tools-Windows-x64.exe colprof.exe targen.exe
 
           for packaged in portable-colprof.exe installer-files/colprof.exe; do
             file "${packaged}" | grep -q 'PE32+.*x86-64'
             strings "${packaged}" | grep -F -- "${ICC44_HELP}"
             cmp "${packaged}" vendor/ArgyllCMS_ICC4.4/profile/colprof.exe
           done
+          unzip -p dist/PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip \
+            targen.exe > portable-targen.exe
+          file portable-targen.exe installer-files/targen.exe | grep -q 'PE32+.*x86-64'
+          cmp portable-targen.exe vendor/ArgyllCMS_ICC4.4/target/targen.exe
+          cmp installer-files/targen.exe vendor/ArgyllCMS_ICC4.4/target/targen.exe
 
           sha256sum dist/PGeneratorPlus-ICC-Tools-Windows-x64.exe \
                     dist/PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip \

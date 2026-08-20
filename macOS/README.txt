@@ -2,8 +2,8 @@ PGenerator+ ICC Tools for macOS (Apple Silicon)
 ===============================================
 
 This package contains the Patch Companion, the SDL3 library it uses, and the
-ArgyllCMS colprof and profcheck tools the PGenerator+ offloads profile fits
-to. Extract the ZIP and run the programs from where they land. Nothing is
+ArgyllCMS targen, colprof, and profcheck tools the PGenerator+ offloads chart
+generation and profile fits to. Extract the ZIP and run the programs from where they land. Nothing is
 installed and nothing is written outside your user account.
 
 Requirements: macOS 14 or newer on Apple Silicon (arm64).
@@ -18,7 +18,7 @@ quarantine mark from a Terminal in the extracted folder:
     xattr -dr com.apple.quarantine .
 
 If the executable bit was not preserved by your unarchiver, run
-`chmod +x PGenPatchCompanion colprof profcheck` once.
+`chmod +x PGenPatchCompanion targen colprof profcheck` once.
 
 Pairing
 =======
@@ -128,8 +128,8 @@ macOS profiles with VCGT calibration.
 Profile build offload
 =====================
 
-colprof and profcheck are bundled so the PGenerator+ can offload its
-long-running profile fits to this computer. This happens automatically while
+targen, colprof, and profcheck are bundled so the PGenerator+ can offload its
+chart generation and long-running profile fits to this computer. This happens automatically while
 the Companion is connected; the tools need no setup.
 
 Licenses for SDL3, the DejaVu fonts, and ArgyllCMS are included alongside

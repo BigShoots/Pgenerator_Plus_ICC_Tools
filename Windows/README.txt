@@ -52,6 +52,11 @@ monitor/profile mapping, enables "Use my settings for this device", and keeps
 its normal automatic reapply behavior. Profile Loader does not need to be open
 before the button is used.
 
+The package also includes the matching ArgyllCMS targen, colprof, and
+profcheck tools. While the Companion is connected, PGenerator+ automatically
+offloads both measurement-chart optimization and profile fitting to this
+computer. No separate setup is required.
+
 On KDE/Linux, extract the package with the desktop archive manager. If the
 executable bit is not preserved, run `chmod +x PGenPatchCompanion` once before
 starting it. The Linux build requires a modern x86-64 distribution with

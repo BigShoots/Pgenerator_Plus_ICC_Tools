@@ -1,5 +1,5 @@
 pkgname=pgen-icc-tools-bin
-pkgver=1.4.25
+pkgver=1.4.26
 pkgrel=1
 pkgdesc='PGenerator+ Patch Companion and display profile loader'
 arch=('x86_64')
@@ -16,7 +16,7 @@ sha256sums=('3082304dbc0afd77a644e462b099e871e5d3608bb5b7d34acd5d53556cf85d1b')
 package() {
   install -d "$pkgdir/opt/pgen-icc-tools" "$pkgdir/usr/bin"
   install -m755 PGenPatchCompanion PGenPatchCompanion.bin PGenProfileLoader reset-hdr-tonemapping.sh \
-    colprof profcheck "$pkgdir/opt/pgen-icc-tools/"
+    colprof profcheck targen "$pkgdir/opt/pgen-icc-tools/"
   install -m755 libSDL3.so.0 "$pkgdir/opt/pgen-icc-tools/libSDL3.so.0"
   install -m644 README.txt SDL3-LICENSE.txt DejaVu-LICENSE.txt \
     ArgyllCMS-LICENSE.txt "$pkgdir/opt/pgen-icc-tools/"

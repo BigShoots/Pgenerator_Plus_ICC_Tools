@@ -1,5 +1,5 @@
 # Builds the macOS (Apple Silicon) ICC Tools package: the Patch Companion
-# against Homebrew SDL3, plus colprof and profcheck from the ArgyllCMS fork's
+# against Homebrew SDL3, plus colprof, profcheck, and targen from the ArgyllCMS fork's
 # Jam build. Every compile step fails the job on error; the result is one ZIP
 # with executable bits preserved, uploaded as a workflow artifact. (The
 # artifact download wraps that ZIP in a second ZIP - that outer layer is
@@ -69,7 +69,7 @@ jobs:
                CFLAGS="-O2 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
           ./ajam-2.5.2-1.3.3/jam0 -v
 
-      - name: Build colprof and profcheck
+      - name: Build ArgyllCMS tools
         working-directory: argyll
         run: |
           # The fork has prebuilt Linux artifacts committed to git. A fresh
@@ -78,16 +78,19 @@ jobs:
           # binary would be packaged unchanged.
           find . -type f \( -name '*.o' -o -name '*.a' \) -delete
           rm -f gamut/GenRMGam imdi/cctiff imdi/greytiff profile/colprof render/timage \
-                spectro/chartread spectro/oeminst spectro/spotread tiff/mkg3states
+                profile/profcheck target/targen spectro/chartread spectro/oeminst \
+                spectro/spotread tiff/mkg3states
           # Jambase reads these to pick host flags; bash does not export them.
           export OSTYPE MACHTYPE HOSTTYPE
-          ../ajam-2.5.2-1.3.3/jam0 -q -fJambase -j3 '<profile>colprof' '<profile>profcheck'
-          file profile/colprof profile/profcheck
+          ../ajam-2.5.2-1.3.3/jam0 -q -fJambase -j3 '<profile>colprof' '<profile>profcheck' '<target>targen'
+          file profile/colprof profile/profcheck target/targen
           file profile/colprof | grep -q arm64
           file profile/profcheck | grep -q arm64
+          file target/targen | grep -q arm64
           (./profile/colprof 2>&1 || true) | grep -m1 Version
           (./profile/colprof 2>&1 || true) | grep -F -- "${ICC44_HELP}"
           (./profile/profcheck 2>&1 || true) | grep -m1 Version
+          (./target/targen 2>&1 || true) | grep -m1 Version
 
       - name: Build Profile Loader
         run: |
@@ -119,13 +122,13 @@ jobs:
             otool -L "bundle/${binary}"
             otool -L "bundle/${binary}" | grep -q '@loader_path/libSDL3'
           done
-          cp argyll/profile/colprof argyll/profile/profcheck bundle/
+          cp argyll/profile/colprof argyll/profile/profcheck argyll/target/targen bundle/
           cp licenses/SDL3-LICENSE.txt licenses/DejaVu-LICENSE.txt \
              licenses/ArgyllCMS-LICENSE.txt bundle/
           cp macOS/README.txt bundle/README.txt
           cp Common/PGenPatchCompanion.template.conf bundle/PGenPatchCompanion.conf
           chmod +x bundle/PGenPatchCompanion bundle/PGenProfileLoader \
-                   bundle/colprof bundle/profcheck
+                   bundle/colprof bundle/profcheck bundle/targen
           (cd bundle && zip -X -r ../PGeneratorPlus-ICC-Tools-macOS-arm64.zip .)
           unzip -l PGeneratorPlus-ICC-Tools-macOS-arm64.zip
           unzip -p PGeneratorPlus-ICC-Tools-macOS-arm64.zip colprof > packaged-colprof

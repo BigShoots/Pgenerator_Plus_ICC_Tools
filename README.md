@@ -13,18 +13,18 @@ Download current builds from the [latest release](../../releases/latest).
 
 | Asset | Platform | Contents |
 | --- | --- | --- |
-| `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows 10/11 x64 | Installer for Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, Start Menu entries, and the uninstaller |
+| `PGeneratorPlus-ICC-Tools-Windows-x64.exe` | Windows 10/11 x64 | Installer for Patch Companion, Profile Loader, ArgyllCMS `targen`, `colprof`, and `profcheck`, Start Menu entries, and the uninstaller |
 | `PGeneratorPlus-ICC-Tools-Portable-Windows-x64.zip` | Windows 10/11 x64 | Portable versions of the same programs |
-| `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux with glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `colprof` and `profcheck`, bundled SDL3, and the KDE HDR tone-mapping reset helper |
+| `PGeneratorPlus-ICC-Tools-Linux-x64.zip` | x86-64 Linux with glibc 2.38 or newer | Patch Companion, Profile Loader, ArgyllCMS `targen`, `colprof`, and `profcheck`, bundled SDL3, and the KDE HDR tone-mapping reset helper |
 | `PGeneratorPlus-ICC-Tools-ArchLinux-x86_64.pkg.tar.zst` | Arch Linux x86-64 | Native package of the Linux tools, installed under `/opt/pgen-icc-tools` with commands linked into `/usr/bin` |
-| `PGeneratorPlus-ICC-Tools-macOS-arm64.dmg` | macOS 14+ on Apple Silicon, experimental | Disk image with Patch Companion, ArgyllCMS `colprof` and `profcheck`; HDR presents through Metal EDR, and profile installing is not offered on macOS |
+| `PGeneratorPlus-ICC-Tools-macOS-arm64.dmg` | macOS 14+ on Apple Silicon, experimental | Disk image with Patch Companion and ArgyllCMS `targen`, `colprof`, and `profcheck`; HDR presents through Metal EDR, and profile installing is not offered on macOS |
 
 The Windows builds are not code-signed, so Windows may show a SmartScreen
 warning.
 
 ## Current release
 
-Version 1.4.25 is paired with the current PGenerator+ build. The desktop tools
+Version 1.4.26 is paired with the current PGenerator+ build. The desktop tools
 in this release:
 
 - recover and verify Windows Advanced Color when an upgrade interrupts the
@@ -97,7 +97,7 @@ in this release:
   build as complete.
 
 The Linux archive and Arch package also contain `reset-hdr-tonemapping.sh`.
-The bundled `colprof` and `profcheck` binaries are built from the pinned
+The bundled `targen`, `colprof`, and `profcheck` binaries are built from the pinned
 `ArgyllCMS_ICC4.4` submodule at commit `0613c3f` (`argyll-4.4-icc44-pgen1`),
 including the ICC 4.4/CICP support and the Linux parallel B2A table builder.
 The Windows package workflow cross-builds both executables from that submodule
@@ -394,7 +394,7 @@ does not require that DLL.
 
 - `../icc-companion/windows-x64/` containing
   `PGeneratorPlusPatchCompanion.exe`, `PGenProfileLoader.exe`, `SDL3.dll`,
-  `colprof.exe`, and `profcheck.exe`
+  `targen.exe`, `colprof.exe`, and `profcheck.exe`
 - `../icc-companion/SDL3-LICENSE.txt` and
   `../icc-companion/ArgyllCMS-LICENSE.txt`
 - `README.txt` and `PROFILE-LOADER-README.txt` in the working directory
@@ -435,6 +435,6 @@ builds as follows:
 | --- | --- | --- |
 | SDL3 | zlib, `licenses/SDL3-LICENSE.txt` | Include with builds that distribute `SDL3.dll` or `libSDL3`: Patch Companion on both platforms and Linux Profile Loader |
 | DejaVu fonts | Bitstream Vera, `licenses/DejaVu-LICENSE.txt` | Include with Linux Profile Loader because `pgen-ui-font.h` contains rendered DejaVu glyphs |
-| ArgyllCMS | AGPLv3, `licenses/ArgyllCMS-LICENSE.txt` | Include with packages containing `colprof` or `profcheck`, along with the required source offer; the bundled binaries are built from our fork, vendored at `vendor/ArgyllCMS_ICC4.4` and published at [BigShoots/ArgyllCMS_ICC4.4](https://github.com/BigShoots/ArgyllCMS_ICC4.4) |
+| ArgyllCMS | AGPLv3, `licenses/ArgyllCMS-LICENSE.txt` | Include with packages containing `targen`, `colprof`, or `profcheck`, along with the required source offer; the bundled binaries are built from our fork, vendored at `vendor/ArgyllCMS_ICC4.4` and published at [BigShoots/ArgyllCMS_ICC4.4](https://github.com/BigShoots/ArgyllCMS_ICC4.4) |
 
 `favicon.ico` is the PGenerator+ application artwork.
