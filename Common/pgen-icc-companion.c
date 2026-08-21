@@ -4215,7 +4215,12 @@ static void companion_run_build(const char *poll_response)
         cleaned[out] = '\0';
 #ifdef _WIN32
         if (build_console.active) {
-            SDL_snprintf(command, sizeof(command), "\"%s\" %s -O \"%s\" \"%s\"",
+            /* system() routes the command through cmd.exe. A command whose
+             * first character is a quote loses that quote in cmd's special
+             * executable-path parsing when the tool lives below a directory
+             * containing spaces. Keep a harmless command in front so the
+             * quoted colprof path is parsed as an ordinary command segment. */
+            SDL_snprintf(command, sizeof(command), "title PGenerator+ ICC Profile Build & \"%s\" %s -O \"%s\" \"%s\"",
                          tool, cleaned, icc_path, base_path);
         } else {
             SDL_snprintf(command, sizeof(command),

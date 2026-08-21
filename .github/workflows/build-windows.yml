@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SDL3_VERSION: "3.4.14"
-      ARGYLL_COMMIT: "0613c3f778a2ad60a511e9a687bac4da1ef20184"
+      ARGYLL_COMMIT: "38275c362db62cdd5d3d113bc5017ed93a0bc77a"
       ICC44_HELP: "-4              Create ICC v4.4 RGB display profile with CICP 9-16-0-1"
     steps:
       - name: Check out ICC Tools and pinned ArgyllCMS
