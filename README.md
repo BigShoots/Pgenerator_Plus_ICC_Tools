@@ -24,9 +24,11 @@ warning.
 
 ## Current release
 
-Version 1.4.27 is paired with the current PGenerator+ build. The desktop tools
+Version 1.4.28 is paired with the current PGenerator+ build. The desktop tools
 in this release:
 
+- restore persisted Windows correction isolation once at every Companion
+  startup, including when the new session starts directly in system handling;
 - recover and verify Windows Advanced Color when an upgrade interrupts the
   disable/re-enable reload cycle, including the case where DXGI initially
   reports HDR as off;
