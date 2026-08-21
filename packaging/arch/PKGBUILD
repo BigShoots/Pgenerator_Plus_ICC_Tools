@@ -11,7 +11,7 @@ optdepends=('kscreen: apply profiles to KDE Plasma displays'
 provides=('pgen-icc-tools')
 conflicts=('pgen-icc-tools')
 source=("PGeneratorPlus-ICC-Tools-Linux-x64.zip::${url}/releases/download/v${pkgver}/PGeneratorPlus-ICC-Tools-Linux-x64.zip")
-sha256sums=('dfdc4b95f2b71d52f382e3600623e0e73e9f2f1ca1ceeb339888a8af85929bb0')
+sha256sums=('5e02baf2db2e7b0a5bcbf1eb92809067936bce5bdc02bce93d41d53e583995ef')
 
 package() {
   install -d "$pkgdir/opt/pgen-icc-tools" "$pkgdir/usr/bin"
