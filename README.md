@@ -24,7 +24,7 @@ warning.
 
 ## Current release
 
-Version 1.4.26 is paired with the current PGenerator+ build. The desktop tools
+Version 1.4.27 is paired with the current PGenerator+ build. The desktop tools
 in this release:
 
 - recover and verify Windows Advanced Color when an upgrade interrupts the
